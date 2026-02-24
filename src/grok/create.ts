@@ -7,7 +7,7 @@ const ENDPOINT = "https://grok.com/rest/media/post/create";
 export type MediaPostType = "MEDIA_POST_TYPE_VIDEO" | "MEDIA_POST_TYPE_IMAGE";
 
 export async function createMediaPost(
-  args: { mediaType: MediaPostType; prompt?: string; mediaUrl?: string; videoConfig?: VideoConfig },
+  args: { mediaType: MediaPostType; prompt?: string; mediaUrl?: string; videoConfig?: VideoConfig | undefined },
   cookie: string,
   settings: GrokSettings,
 ): Promise<{ postId: string }> {
@@ -45,7 +45,7 @@ export async function createPost(
   fileUri: string,
   cookie: string,
   settings: GrokSettings,
-  videoConfig?: VideoConfig,
+  videoConfig?: VideoConfig | undefined,
 ): Promise<{ postId: string }> {
   return createMediaPost(
     {
