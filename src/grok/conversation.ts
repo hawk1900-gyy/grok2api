@@ -67,42 +67,46 @@ export function buildConversationPayload(args: {
   const cfg = getModelInfo(requestModel);
   const { grokModel, mode, isVideoModel } = toGrokModel(requestModel);
 
-  let modeFlag = "--mode=custom";
-  if (isVideoModel && typeof videoConfig?.preset === "string") {
-    const preset = videoConfig.preset.toLowerCase();
+  if (cfg?.is_video_model) {
+    if (!postId) throw new Error("视频模型缺少 postId（需要先创建 media post）");
+
+    const aspectRatio = (videoConfig?.aspect_ratio ?? "").trim() || "3:2";
+    const videoLengthRaw = Number(videoConfig?.video_length ?? 6);
+    const videoLength = Number.isFinite(videoLengthRaw) ? Math.max(1, Math.floor(videoLengthRaw)) : 6;
+    const resInput = (videoConfig?.resolution ?? "SD").trim();
+    const videoResolution = resInput === "720p" || resInput === "HD" ? "HD" : "SD";
+    const preset = (videoConfig?.preset ?? "normal").trim();
+
+    let modeFlag = "--mode=custom";
     if (preset === "fun") modeFlag = "--mode=extremely-crazy";
     else if (preset === "normal") modeFlag = "--mode=normal";
     else if (preset === "spicy") modeFlag = "--mode=extremely-spicy-or-crazy";
-  }
 
-  const responseMetadata = {
-    requestModelDetails: { modelId: grokModel },
-    ...(isVideoModel
-      ? {
-          aspectRatio: videoConfig?.aspect_ratio,
-          duration: videoConfig?.video_length,
-          resolution: videoConfig?.resolution,
-        }
-      : {}),
-  };
+    const prompt = `${String(content || "").trim()} ${modeFlag}`.trim();
 
-  if (cfg?.is_video_model && (imgUris.length || postId)) {
-    const ref = postId ? `https://grok.com/imagine/${postId}` : `https://assets.grok.com/post/${imgUris[0]}`;
-    const prompt = [content, modeFlag].filter(Boolean).join(" ");
-    const referer = postId ? `https://grok.com/imagine/${postId}` : undefined;
-    const videoPayload = {
-      temporary: true,
-      modelName: "grok-3",
-      message: `${ref}  ${prompt}`.trim(),
-      fileAttachments: imgIds,
-      toolOverrides: { videoGen: true },
-      responseMetadata,
-    };
-    console.log("[buildConversationPayload] video payload:", JSON.stringify(videoPayload));
     return {
       isVideoModel: true,
-      ...(referer ? { referer } : {}),
-      payload: videoPayload,
+      referer: "https://grok.com/imagine",
+      payload: {
+        temporary: true,
+        modelName: "grok-3",
+        message: prompt,
+        toolOverrides: { videoGen: true },
+        enableSideBySide: true,
+        responseMetadata: {
+          experiments: [],
+          modelConfigOverride: {
+            modelMap: {
+              videoGenModelConfig: {
+                parentPostId: postId,
+                aspectRatio,
+                videoLength,
+                videoResolution,
+              },
+            },
+          },
+        },
+      },
     };
   }
 
@@ -127,7 +131,7 @@ export function buildConversationPayload(args: {
       isReasoning: false,
       webpageUrls: [],
       disableTextFollowUps: true,
-      responseMetadata,
+      responseMetadata: { requestModelDetails: { modelId: grokModel } },
       disableMemory: false,
       forceSideBySide: false,
       modelMode: mode,

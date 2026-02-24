@@ -152,14 +152,13 @@ openAiRoutes.post("/chat/completions", async (c) => {
         let postId: string | undefined;
         if (isVideoModel) {
           if (imgUris.length) {
-            const post = await createPost(imgUris[0]!, cookie, settingsBundle.grok, videoConfig);
+            const post = await createPost(imgUris[0]!, cookie, settingsBundle.grok);
             postId = post.postId || undefined;
           } else {
             const post = await createMediaPost(
               {
                 mediaType: "MEDIA_POST_TYPE_VIDEO",
                 prompt: content,
-                ...(videoConfig ? { videoConfig } : {}),
               },
               cookie,
               settingsBundle.grok,
