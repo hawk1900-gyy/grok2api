@@ -159,7 +159,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
               {
                 mediaType: "MEDIA_POST_TYPE_VIDEO",
                 prompt: content,
-                videoConfig,
+                ...(videoConfig ? { videoConfig } : {}),
               },
               cookie,
               settingsBundle.grok,

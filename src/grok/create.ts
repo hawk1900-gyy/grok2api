@@ -51,7 +51,7 @@ export async function createPost(
     {
       mediaType: "MEDIA_POST_TYPE_IMAGE",
       mediaUrl: `https://assets.grok.com/${fileUri}`,
-      videoConfig,
+      ...(videoConfig ? { videoConfig } : {}),
     },
     cookie,
     settings,
