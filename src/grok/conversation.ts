@@ -80,8 +80,8 @@ export function buildConversationPayload(args: {
     ...(isVideoModel
       ? {
           aspectRatio: videoConfig?.aspect_ratio,
-          videoLength: videoConfig?.video_length,
-          videoResolution: videoConfig?.resolution,
+          duration: videoConfig?.video_length,
+          resolution: videoConfig?.resolution,
         }
       : {}),
   };
@@ -90,17 +90,19 @@ export function buildConversationPayload(args: {
     const ref = postId ? `https://grok.com/imagine/${postId}` : `https://assets.grok.com/post/${imgUris[0]}`;
     const prompt = [content, modeFlag].filter(Boolean).join(" ");
     const referer = postId ? `https://grok.com/imagine/${postId}` : undefined;
+    const videoPayload = {
+      temporary: true,
+      modelName: "grok-3",
+      message: `${ref}  ${prompt}`.trim(),
+      fileAttachments: imgIds,
+      toolOverrides: { videoGen: true },
+      responseMetadata,
+    };
+    console.log("[buildConversationPayload] video payload:", JSON.stringify(videoPayload));
     return {
       isVideoModel: true,
       ...(referer ? { referer } : {}),
-      payload: {
-        temporary: true,
-        modelName: "grok-3",
-        message: `${ref}  ${prompt}`.trim(),
-        fileAttachments: imgIds,
-        toolOverrides: { videoGen: true },
-        responseMetadata,
-      },
+      payload: videoPayload,
     };
   }
 
