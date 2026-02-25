@@ -9,7 +9,7 @@ import { uploadImage } from "../grok/upload";
 import { createMediaPost, createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { addRequestLog } from "../repo/logs";
-import { applyCooldown, recordTokenFailure, selectBestToken } from "../repo/tokens";
+import { applyCooldown, recordTokenFailure, recordTokenSuccess, selectBestToken } from "../repo/tokens";
 import type { ApiAuthInfo } from "../auth";
 
 function openAiError(message: string, code: string): Record<string, unknown> {
@@ -192,6 +192,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
           if (retryCodes.includes(upstream.status) && attempt < maxRetry - 1) continue;
           break;
         }
+
+        await recordTokenSuccess(c.env.DB, jwt);
 
         if (stream) {
           const sse = createOpenAiStreamFromGrokNdjson(upstream, {

@@ -19,7 +19,7 @@ export interface TokenRow {
   failed_count: number;
 }
 
-const MAX_FAILURES = 3;
+const MAX_FAILURES = 5;
 
 function parseTags(tagsJson: string): string[] {
   try {
@@ -173,6 +173,14 @@ export async function selectBestToken(db: Env["DB"], model: string): Promise<{ t
   return (await pick("sso")) ?? (await pick("ssoSuper"));
 }
 
+export async function recordTokenSuccess(db: Env["DB"], token: string): Promise<void> {
+  await dbRun(
+    db,
+    "UPDATE tokens SET failed_count = 0, status = CASE WHEN status = 'expired' THEN 'active' ELSE status END WHERE token = ?",
+    [token],
+  );
+}
+
 export async function recordTokenFailure(
   db: Env["DB"],
   token: string,
@@ -187,9 +195,10 @@ export async function recordTokenFailure(
     [now, reason, token],
   );
 
+  // 只有 401 (认证失败) 才标记为永久失效，403 等临时错误只做冷却
   const row = await dbFirst<{ failed_count: number }>(db, "SELECT failed_count FROM tokens WHERE token = ?", [token]);
   if (!row) return;
-  if (status >= 400 && status < 500 && row.failed_count >= MAX_FAILURES) {
+  if (status === 401 && row.failed_count >= MAX_FAILURES) {
     await dbRun(db, "UPDATE tokens SET status = 'expired' WHERE token = ?", [token]);
   }
 }
