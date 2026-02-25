@@ -24,6 +24,7 @@ import {
   updateTokenNote,
   updateTokenTags,
   updateTokenLimits,
+  resetAllTokenStates,
 } from "../repo/tokens";
 import { checkRateLimits } from "../grok/rateLimits";
 import { addRequestLog, clearRequestLogs, getRequestLogs, getRequestStats } from "../repo/logs";
@@ -285,6 +286,15 @@ adminRoutes.get("/api/tokens/tags/all", requireAdminAuth, async (c) => {
     return c.json({ success: true, data: tags });
   } catch (e) {
     return c.json(jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "GET_TAGS_ERROR"), 500);
+  }
+});
+
+adminRoutes.post("/api/tokens/reset-all", requireAdminAuth, async (c) => {
+  try {
+    const affected = await resetAllTokenStates(c.env.DB);
+    return c.json({ success: true, message: `已重置 ${affected} 个 token 的状态`, data: { affected } });
+  } catch (e) {
+    return c.json({ success: false, message: e instanceof Error ? e.message : String(e) }, 500);
   }
 });
 

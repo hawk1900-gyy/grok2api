@@ -168,9 +168,27 @@ export async function selectBestToken(db: Env["DB"], model: string): Promise<{ t
     return row ? { token: row.token, token_type } : null;
   };
 
-  if (isHeavy) return pick("ssoSuper");
+  // 降级查询：忽略 failed_count 和 cooldown，只排除 expired
+  const pickLenient = async (token_type: TokenType): Promise<{ token: string; token_type: TokenType } | null> => {
+    const row = await dbFirst<{ token: string }>(
+      db,
+      `SELECT token FROM tokens
+       WHERE token_type = ?
+         AND status != 'expired'
+         AND ${field} != 0
+       ORDER BY failed_count ASC, RANDOM()
+       LIMIT 1`,
+      [token_type],
+    );
+    if (row) {
+      await dbRun(db, "UPDATE tokens SET failed_count = 0, cooldown_until = NULL WHERE token = ?", [row.token]);
+    }
+    return row ? { token: row.token, token_type } : null;
+  };
 
-  return (await pick("sso")) ?? (await pick("ssoSuper"));
+  if (isHeavy) return (await pick("ssoSuper")) ?? (await pickLenient("ssoSuper"));
+
+  return (await pick("sso")) ?? (await pick("ssoSuper")) ?? (await pickLenient("sso")) ?? (await pickLenient("ssoSuper"));
 }
 
 export async function recordTokenSuccess(db: Env["DB"], token: string): Promise<void> {
@@ -216,6 +234,18 @@ export async function applyCooldown(db: Env["DB"], token: string, status: number
     until = now + 30 * 1000;
   }
   await dbRun(db, "UPDATE tokens SET cooldown_until = ? WHERE token = ?", [until, token]);
+}
+
+export async function resetAllTokenStates(db: Env["DB"]): Promise<number> {
+  const result = await dbFirst<{ c: number }>(
+    db,
+    "SELECT COUNT(1) as c FROM tokens WHERE failed_count > 0 OR status = 'expired' OR cooldown_until IS NOT NULL",
+  );
+  await dbRun(
+    db,
+    "UPDATE tokens SET failed_count = 0, cooldown_until = NULL, status = 'active'",
+  );
+  return result?.c ?? 0;
 }
 
 export async function updateTokenLimits(
