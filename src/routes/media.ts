@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { getSettings, normalizeCfCookie } from "../settings";
-import { applyCooldown, recordTokenFailure, selectBestToken } from "../repo/tokens";
+import { applyCooldown, selectBestToken } from "../repo/tokens";
 import { getDynamicHeaders } from "../grok/headers";
 import { deleteCacheRow, touchCacheRow, upsertCacheRow, type CacheType } from "../repo/cache";
 import { nowMs } from "../utils/time";
@@ -48,6 +48,14 @@ function isAllowedUpstreamHost(hostname: string): boolean {
 
 function isUuid(s: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+const TOKEN_OWNER_PREFIX = "tok-own:";
+const TOKEN_OWNER_TTL = 7 * 24 * 60 * 60;
+
+function extractGrokUserId(path: string): string | null {
+  const m = path.match(/^\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i);
+  return m ? m[1]!.toLowerCase() : null;
 }
 
 // Legacy decoder for paths like:
@@ -208,34 +216,70 @@ mediaRoutes.get("/images/:imgPath{.+}", async (c) => {
 
   const settingsBundle = await getSettings(c.env);
   const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+  const grokUserId = extractGrokUserId(originalPath);
+
+  const buildCookie = (token: string) =>
+    cf ? `sso-rw=${token};sso=${token};${cf}` : `sso-rw=${token};sso=${token}`;
+
+  const tryFetch = async (token: string) => {
+    const cookie = buildCookie(token);
+    const hdrs = toUpstreamHeaders({ pathname: originalPath, cookie, settings: settingsBundle.grok });
+    return fetch(url.toString(), { headers: rangeHeader ? { ...hdrs, Range: rangeHeader } : hdrs });
+  };
 
   const triedTokens = new Set<string>();
-  const maxAttempts = 4;
   let lastStatus = 0;
   let upstream: Response | null = null;
+  let successToken: string | null = null;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const chosen = await selectBestToken(c.env.DB, "grok-4-fast");
-    if (!chosen) break;
-    if (triedTokens.has(chosen.token)) break;
-    triedTokens.add(chosen.token);
-
-    const cookie = cf ? `sso-rw=${chosen.token};sso=${chosen.token};${cf}` : `sso-rw=${chosen.token};sso=${chosen.token}`;
-    const baseHeaders = toUpstreamHeaders({ pathname: originalPath, cookie, settings: settingsBundle.grok });
-
-    const resp = await fetch(url.toString(), { headers: rangeHeader ? { ...baseHeaders, Range: rangeHeader } : baseHeaders });
-    if (resp.ok && resp.body) {
-      upstream = resp;
-      break;
+  // Phase 1: 尝试 KV 中记忆的 owner token（不施加 cooldown）
+  if (grokUserId) {
+    const remembered = await c.env.KV_CACHE.get(`${TOKEN_OWNER_PREFIX}${grokUserId}`);
+    if (remembered) {
+      triedTokens.add(remembered);
+      const resp = await tryFetch(remembered);
+      if (resp.ok && resp.body) {
+        upstream = resp;
+        successToken = remembered;
+      } else {
+        lastStatus = resp.status;
+        await resp.text().catch(() => "");
+      }
     }
-    lastStatus = resp.status;
-    await resp.text().catch(() => "");
-    // 403/401 可能是 token 不匹配（视频属于另一个账号），不记录为 token 失败
-    await applyCooldown(c.env.DB, chosen.token, resp.status);
+  }
+
+  // Phase 2: 记忆未命中或失败，轮询可用 token
+  if (!upstream) {
+    const maxAttempts = 4;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const chosen = await selectBestToken(c.env.DB, "grok-4-fast");
+      if (!chosen) break;
+      if (triedTokens.has(chosen.token)) break;
+      triedTokens.add(chosen.token);
+
+      const resp = await tryFetch(chosen.token);
+      if (resp.ok && resp.body) {
+        upstream = resp;
+        successToken = chosen.token;
+        break;
+      }
+      lastStatus = resp.status;
+      await resp.text().catch(() => "");
+      await applyCooldown(c.env.DB, chosen.token, resp.status);
+    }
   }
 
   if (!upstream || !upstream.body) {
     return new Response(`Upstream ${lastStatus || 503}`, { status: lastStatus || 503 });
+  }
+
+  // Phase 3: 成功后记忆 user-uuid → token 映射
+  if (grokUserId && successToken) {
+    c.executionCtx.waitUntil(
+      c.env.KV_CACHE.put(`${TOKEN_OWNER_PREFIX}${grokUserId}`, successToken, {
+        expirationTtl: TOKEN_OWNER_TTL,
+      }),
+    );
   }
 
   const contentType = upstream.headers.get("content-type") ?? "";
