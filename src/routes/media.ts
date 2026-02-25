@@ -207,22 +207,35 @@ mediaRoutes.get("/images/:imgPath{.+}", async (c) => {
   c.executionCtx.waitUntil(deleteCacheRow(c.env.DB, key));
 
   const settingsBundle = await getSettings(c.env);
-  const chosen = await selectBestToken(c.env.DB, "grok-4-fast");
-  if (!chosen) return c.text("No available token", 503);
-
   const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
-  const cookie = cf ? `sso-rw=${chosen.token};sso=${chosen.token};${cf}` : `sso-rw=${chosen.token};sso=${chosen.token}`;
 
-  const baseHeaders = toUpstreamHeaders({ pathname: originalPath, cookie, settings: settingsBundle.grok });
+  const triedTokens = new Set<string>();
+  const maxAttempts = 4;
+  let lastStatus = 0;
+  let upstream: Response | null = null;
 
-  // Range requests: KV can't stream partial content efficiently; proxy from upstream.
-  // (If the object is cached and within KV limits, we do support Range by slicing bytes above.)
-  const upstream = await fetch(url.toString(), { headers: rangeHeader ? { ...baseHeaders, Range: rangeHeader } : baseHeaders });
-  if (!upstream.ok || !upstream.body) {
-    const txt = await upstream.text().catch(() => "");
-    await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
-    await applyCooldown(c.env.DB, chosen.token, upstream.status);
-    return new Response(`Upstream ${upstream.status}`, { status: upstream.status });
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const chosen = await selectBestToken(c.env.DB, "grok-4-fast");
+    if (!chosen) break;
+    if (triedTokens.has(chosen.token)) break;
+    triedTokens.add(chosen.token);
+
+    const cookie = cf ? `sso-rw=${chosen.token};sso=${chosen.token};${cf}` : `sso-rw=${chosen.token};sso=${chosen.token}`;
+    const baseHeaders = toUpstreamHeaders({ pathname: originalPath, cookie, settings: settingsBundle.grok });
+
+    const resp = await fetch(url.toString(), { headers: rangeHeader ? { ...baseHeaders, Range: rangeHeader } : baseHeaders });
+    if (resp.ok && resp.body) {
+      upstream = resp;
+      break;
+    }
+    lastStatus = resp.status;
+    await resp.text().catch(() => "");
+    // 403/401 可能是 token 不匹配（视频属于另一个账号），不记录为 token 失败
+    await applyCooldown(c.env.DB, chosen.token, resp.status);
+  }
+
+  if (!upstream || !upstream.body) {
+    return new Response(`Upstream ${lastStatus || 503}`, { status: lastStatus || 503 });
   }
 
   const contentType = upstream.headers.get("content-type") ?? "";
