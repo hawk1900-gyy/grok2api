@@ -3,7 +3,7 @@
 ## 概述
 
 grok2api 将 Grok.com 网页端的内部 API 逆向封装为 OpenAI 兼容格式，部署在 Cloudflare Workers 上。
-支持文本对话、图片生成、视频生成（文生视频 + 图生视频）。
+支持文本对话、图片生成、视频生成（文生视频 + 图生视频）、多图对话（最多 7 张 + @图N 引用）。
 
 ## 技术栈
 
@@ -26,7 +26,7 @@ src/
 │   ├── admin.ts             # 管理后台 API
 │   └── media.ts             # 媒体代理 (/images/)
 ├── grok/
-│   ├── conversation.ts      # 构建 Grok 对话 payload（核心）
+│   ├── conversation.ts      # 构建 Grok 对话 payload（核心）+ 多图 @引用解析
 │   ├── processor.ts         # 解析 Grok NDJSON 流响应
 │   ├── models.ts            # 模型映射配置
 │   ├── create.ts            # 创建媒体帖子 (/rest/media/post/create)
@@ -50,9 +50,11 @@ src/
 客户端 → POST /v1/chat/completions
   → requireApiAuth (验证 API Key)
   → selectBestToken (从 D1 选择最佳 Token)
+  → extractContent (提取文本 + 图片URL列表)
+  → [非视频] 图片截断为最多 7 张
   → [视频模型] createMediaPost → 获取 postId
-  → [有图片] uploadImage → 获取 fileId
-  → buildConversationPayload (构建 Grok 内部 API payload)
+  → [有图片] mapLimit(uploadImage, 5) → 批量获取 fileId
+  → buildConversationPayload (构建 payload，含 resolveImageReferences @图N→fileId)
   → sendConversationRequest (POST grok.com/rest/app-chat/conversations/new)
   → [流式] createOpenAiStreamFromGrokNdjson → SSE 响应
   → [非流式] parseOpenAiFromGrokNdjson → JSON 响应
@@ -76,9 +78,9 @@ src/
       "modelMap": {
         "videoGenModelConfig": {
           "parentPostId": "xxx",
-          "aspectRatio": "16:9",
+          "aspectRatio": "2:3",
           "videoLength": 10,
-          "videoResolution": "HD"
+          "resolutionName": "480p"
         }
       }
     }
@@ -88,9 +90,11 @@ src/
 
 **关键参数映射：**
 - `videoLength`: 整数秒（1-15），客户端传 `video_config.video_length`
-- `videoResolution`: `"HD"` (720p) 或 `"SD"` (480p)，客户端传 `video_config.resolution`
-- `aspectRatio`: 宽高比字符串，客户端传 `video_config.aspect_ratio`
-- `parentPostId`: 通过 createMediaPost 获取的帖子 ID
+- `resolutionName`: `"720p"` 或 `"480p"`，客户端传 `video_config.resolution`
+- `aspectRatio`: 宽高比字符串（默认 "2:3"），客户端传 `video_config.aspect_ratio`
+- `parentPostId`: 单图=createPost(imageUri) 返回的 ID；多图/无图=createMediaPost(VIDEO) 返回的 ID
+- `isReferenceToVideo`: 多图 @ 引用时为 `true`
+- `imageReferences`: 多图时的完整 asset URL 数组
 
 ## Token 管理机制
 
@@ -118,6 +122,38 @@ src/
 - token-owner 记忆机制通过 KV 建立 `grok-user-uuid → sso-token` 映射
 - 首次下载可能需重试 1-2 次，之后同账号内容均一次命中
 - 媒体下载失败不记录 token failure 也不施加 cooldown（避免阻塞 API 请求）
+
+## 多图 Imagine 视频支持
+
+Grok Imagine 视频模式支持多图 + @ 引用。@ 引用**仅限 Imagine 视频模式**，普通问答模式不支持。
+
+**单图 vs 多图 payload 对比：**
+
+| | 单图 | 多图 + @引用 |
+|---|---|---|
+| message | `{assetUrl}  {prompt} --mode=...` | `@{fileId1} text @{fileId2} --mode=...` |
+| fileAttachments | `[fileId]` | 无 |
+| parentPostId | = fileId (image post) | 独立 ID (video post) |
+| isReferenceToVideo | 无 | `true` |
+| imageReferences | 无 | `[assetUrl1, assetUrl2, ...]` |
+| resolutionName | `"480p"` | `"480p"` |
+
+**处理流程：**
+```
+用户消息（OpenAI 格式，content 数组含多个 image_url + @图N 文本）
+  → extractContent: 提取 images[] 和文本
+  → images.slice(0, 7): 最多 7 张
+  → mapLimit(uploadImage, 5): 并发上传，获取 fileId[] 和 fileUri[]
+  → [视频+多图] createMediaPost(VIDEO) → 获取容器 postId
+  → [视频+单图] createPost(imageUri) → 获取 postId (= fileId)
+  → buildConversationPayload:
+      多图: resolveImageReferences(@图N → @fileId) + isReferenceToVideo + imageReferences
+      单图: assetUrl 拼在 message 前面 + fileAttachments
+```
+
+**@图N 引用格式（OpenAI API 侧）：**
+- 用户在 prompt 中写 `@图1`、`@图2`（1-based 索引）
+- `resolveImageReferences()` 将 `@图N` 替换为 `@{fileId}`（Grok 内部格式：@ 直接跟 UUID）
 
 ## 注意事项
 

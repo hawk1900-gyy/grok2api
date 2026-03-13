@@ -142,7 +142,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const { content, images } = extractContent(body.messages as any);
       const cfg = MODEL_CONFIG[requestedModel]!;
       const isVideoModel = Boolean(cfg.is_video_model);
-      const imgInputs = isVideoModel && images.length > 1 ? images.slice(0, 1) : images;
+      const MAX_IMAGES = 7;
+      const imgInputs = images.slice(0, MAX_IMAGES);
 
       try {
         const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok));
@@ -151,15 +152,22 @@ openAiRoutes.post("/chat/completions", async (c) => {
 
         let postId: string | undefined;
         if (isVideoModel) {
-          if (imgUris.length) {
+          if (imgIds.length > 1) {
+            // 多图: 创建视频容器 post（parentPostId 与图片 ID 独立）
+            const post = await createMediaPost(
+              { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },
+              cookie,
+              settingsBundle.grok,
+            );
+            postId = post.postId || undefined;
+          } else if (imgUris.length === 1) {
+            // 单图: 从图片创建 post
             const post = await createPost(imgUris[0]!, cookie, settingsBundle.grok);
             postId = post.postId || undefined;
           } else {
+            // 无图: 创建视频 post
             const post = await createMediaPost(
-              {
-                mediaType: "MEDIA_POST_TYPE_VIDEO",
-                prompt: content,
-              },
+              { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },
               cookie,
               settingsBundle.grok,
             );

@@ -54,6 +54,25 @@ export function extractContent(messages: OpenAIChatMessage[]): { content: string
   return { content: formatted.join("\n"), images };
 }
 
+/**
+ * 将用户 prompt 中的 @图N 引用替换为 Grok 内部的 @fileId 格式。
+ * 仅用于 Imagine 视频模式的多图 @ 引用场景。
+ *
+ * Grok 内部格式: @{fileId} (UUID 直接跟在 @ 后面)
+ * 例: "@图1 变身为 @图2" → "@69fd8e5b-... 变身为 @6ca7fbfe-..."
+ */
+export function resolveImageReferences(message: string, imgIds: string[]): string {
+  if (!imgIds.length) return message;
+
+  return message.replace(/@图(\d+)/g, (_match, numStr) => {
+    const idx = parseInt(numStr, 10) - 1;
+    if (idx >= 0 && idx < imgIds.length) {
+      return `@${imgIds[idx]}`;
+    }
+    return _match;
+  });
+}
+
 export function buildConversationPayload(args: {
   requestModel: string;
   content: string;
@@ -70,11 +89,11 @@ export function buildConversationPayload(args: {
   if (cfg?.is_video_model) {
     if (!postId) throw new Error("视频模型缺少 postId（需要先创建 media post）");
 
-    const aspectRatio = (videoConfig?.aspect_ratio ?? "").trim() || "3:2";
+    const aspectRatio = (videoConfig?.aspect_ratio ?? "").trim() || "2:3";
     const videoLengthRaw = Number(videoConfig?.video_length ?? 6);
     const videoLength = Number.isFinite(videoLengthRaw) ? Math.max(1, Math.floor(videoLengthRaw)) : 6;
-    const resInput = (videoConfig?.resolution ?? "SD").trim();
-    const videoResolution = resInput === "720p" || resInput === "HD" ? "HD" : "SD";
+    const resInput = (videoConfig?.resolution ?? "480p").trim();
+    const resolutionName = resInput === "720p" || resInput === "HD" ? "720p" : "480p";
     const preset = (videoConfig?.preset ?? "normal").trim();
 
     let modeFlag = "--mode=custom";
@@ -82,32 +101,48 @@ export function buildConversationPayload(args: {
     else if (preset === "normal") modeFlag = "--mode=normal";
     else if (preset === "spicy") modeFlag = "--mode=extremely-spicy-or-crazy";
 
-    const prompt = `${String(content || "").trim()} ${modeFlag}`.trim();
+    const assetUrls = imgUris.map((uri) => `https://assets.grok.com/${uri}`);
+    const isMultiImage = imgIds.length > 1;
+    const textContent = String(content || "").trim();
 
-    return {
-      isVideoModel: true,
-      referer: "https://grok.com/imagine",
-      payload: {
-        temporary: true,
-        modelName: "grok-3",
-        message: prompt,
-        toolOverrides: { videoGen: true },
-        enableSideBySide: true,
-        responseMetadata: {
-          experiments: [],
-          modelConfigOverride: {
-            modelMap: {
-              videoGenModelConfig: {
-                parentPostId: postId,
-                aspectRatio,
-                videoLength,
-                videoResolution,
-              },
-            },
-          },
-        },
+    let message: string;
+    const payload: Record<string, unknown> = {
+      temporary: true,
+      modelName: "grok-3",
+      toolOverrides: { videoGen: true },
+      enableSideBySide: true,
+    };
+
+    const videoGenModelConfig: Record<string, unknown> = {
+      parentPostId: postId,
+      aspectRatio,
+      videoLength,
+      resolutionName,
+    };
+
+    if (isMultiImage) {
+      // 多图 + @ 引用模式: message 中用 @fileId 引用图片
+      message = `${resolveImageReferences(textContent, imgIds)} ${modeFlag}`.trim();
+      videoGenModelConfig.isReferenceToVideo = true;
+      videoGenModelConfig.imageReferences = assetUrls;
+    } else if (imgIds.length === 1) {
+      // 单图模式: 完整 asset URL 拼在 message 前面
+      message = `${assetUrls[0]}  ${textContent} ${modeFlag}`.trim();
+      payload.fileAttachments = [imgIds[0]];
+    } else {
+      // 无图模式: 纯文本 prompt
+      message = `${textContent} ${modeFlag}`.trim();
+    }
+
+    payload.message = message;
+    payload.responseMetadata = {
+      experiments: [],
+      modelConfigOverride: {
+        modelMap: { videoGenModelConfig },
       },
     };
+
+    return { isVideoModel: true, referer: "https://grok.com/imagine", payload };
   }
 
   return {

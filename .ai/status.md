@@ -1,9 +1,9 @@
 # Current Session
 
-- **Date**: 2026-02-25
-- **Goal**: 媒体代理跨账号下载修复 + Token 选择自愈机制
-- **Phase**: ✅ Completed
-- **Context**: 50 个视频中 17 个下载链接 403，原因是媒体代理随机选 token 但 assets.grok.com 要求生成视频的账号 token 才能下载。修复过程中还暴露了 cooldown 连锁导致所有 token 不可用的问题。
+- **Date**: 2026-03-13
+- **Goal**: Grok 多图上传 + @引用 支持
+- **Phase**: 多图 + @引用支持已完成
+- **Context**: Grok Imagine 视频模式支持多图（最多 7 张）和 @ 引用。通过手动抓包分析 conversations/new payload，确认了 Grok 内部的多图引用格式并完成 grok2api 改造。
 
 # Completed
 
@@ -16,11 +16,20 @@
 - [x] 移除媒体代理中的 cooldown，避免阻塞视频生成请求
 - [x] selectBestToken 降级查询（严格条件无结果时自动放宽）
 - [x] 管理端 token 状态一键重置接口（POST /admin/api/tokens/reset-all）
+- [x] 多图上传数量限制：所有模型最多 7 张（openai.ts）
+- [x] 视频模型多图支持：移除视频模型单图限制，多图时创建视频容器 post
+- [x] @图N 引用解析：resolveImageReferences() 将 @图N 映射为 @fileId（Imagine 视频模式专用）
+- [x] 视频模型 payload 重构：单图=asset URL 拼 message + fileAttachments；多图=@fileId 引用 + isReferenceToVideo + imageReferences
+- [x] 修复 videoResolution → resolutionName（"480p"/"720p" 替代 "SD"/"HD"）
+- [x] 默认 aspectRatio 改为 "2:3"（与 Grok 网页端一致）
 
 # Todo
 
 - [ ] 监控：确认 token-owner 记忆命中率在生产环境表现
 - [ ] 待观察：视频下载偶尔超时问题（网络层面，非代码问题）
+- [x] 本地测试：多图视频生成（3 张图 + @图N 引用，wrangler dev 验证通过）
+- [x] 本地测试：单图视频生成（resolutionName 兼容性验证通过）
+- [ ] 部署测试：推送到 Cloudflare Workers 后验证多图/单图视频生成
 
 # Notes
 
