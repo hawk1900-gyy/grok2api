@@ -267,11 +267,11 @@ openAiRoutes.post("/chat/completions", async (c) => {
           global: settingsBundle.global,
           origin,
           requestedModel,
-        }) as Record<string, unknown>;
-        json._debug = _dbg;
+        });
+        const result = { ...json, _debug: _dbg };
 
         const duration = (Date.now() - start) / 1000;
-        await addRequestLog(c.env.DB, {
+        addRequestLog(c.env.DB, {
           ip,
           model: requestedModel,
           duration: Number(duration.toFixed(2)),
@@ -279,9 +279,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
           key_name: keyName,
           token_suffix: jwt.slice(-6),
           error: "",
-        });
+        }).catch(() => {});
 
-        return c.json(json);
+        return c.json(result);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         lastErr = msg;
