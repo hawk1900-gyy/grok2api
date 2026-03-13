@@ -29,12 +29,12 @@ async function mapLimit<T, R>(
   limit: number,
   fn: (item: T) => Promise<R>,
 ): Promise<R[]> {
-  const results: R[] = [];
-  const queue = items.slice();
-  const workers = Array.from({ length: Math.max(1, limit) }, async () => {
-    while (queue.length) {
-      const item = queue.shift() as T;
-      results.push(await fn(item));
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIdx < items.length) {
+      const idx = nextIdx++;
+      results[idx] = await fn(items[idx]!);
     }
   });
   await Promise.all(workers);
@@ -200,6 +200,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
           settings: settingsBundle.grok,
           videoConfig,
         });
+        _dbg.grokMessage = String(payload.message ?? "").slice(0, 200);
+        _dbg.imgIdOrder = imgIds.map((id) => id.slice(0, 12));
 
         const upstream = await sendConversationRequest({
           payload,
