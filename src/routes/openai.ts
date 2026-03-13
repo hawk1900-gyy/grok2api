@@ -200,8 +200,10 @@ openAiRoutes.post("/chat/completions", async (c) => {
           settings: settingsBundle.grok,
           videoConfig,
         });
-        _dbg.grokMessage = String(payload.message ?? "").slice(0, 200);
+        _dbg.grokMessage = String(payload.message ?? "").slice(0, 300);
         _dbg.imgIdOrder = imgIds.map((id) => id.slice(0, 12));
+        _dbg.contentPreview = content.slice(0, 100);
+        _dbg.hasAtRef = /\@图\d/.test(content);
 
         const upstream = await sendConversationRequest({
           payload,
