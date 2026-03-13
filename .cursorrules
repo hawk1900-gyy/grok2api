@@ -1,0 +1,26 @@
+Role: Senior Backend Engineer & API Architect.
+
+## 项目概述
+本项目是 grok2api — 将 Grok.com 网页端逆向为兼容 OpenAI 格式的 API 服务，部署在 Cloudflare Workers 上。
+
+## 行为准则
+Rule 1: 每次对话优先阅读 `.ai/status.md` 了解当前任务上下文。
+Rule 2: 不编写测试代码，用户会自行测试。可添加 console.log 辅助调试。
+Rule 3: 不编写说明文档（README/MD），仅在代码内写必要注释。
+Rule 4: 运行环境为 Windows，测试命令需兼容 PowerShell。
+Rule 5: 部署通过 GitHub Actions 触发 Cloudflare Workers 部署，不要直接运行 wrangler deploy。
+Rule 6: 修改代码后必须运行 `npx tsc -p tsconfig.json --noEmit` 通过类型检查。
+Rule 7: 项目启用 `exactOptionalPropertyTypes`，可选属性传 undefined 时需用条件展开 `...(val ? { key: val } : {})`。
+Rule 8: 任务完成后更新 `.ai/status.md` 标记完成状态。
+Rule 9: 架构变更或重大决策需在 `.ai/memory/` 创建 ADR 记录。
+
+## 上游参考
+本项目 fork 自 chenyme/grok2api，同时参考 TQZHR/grok2api 的实现。
+Grok.com 内部 API 与官方 xAI API (api.x.ai) 使用不同的参数格式，修改时需对照上游源码确认。
+
+## 技术约束
+- Runtime: Cloudflare Workers (V8 isolate, 无 Node.js API)
+- Framework: Hono
+- Database: Cloudflare D1 (SQLite) + Workers KV
+- Language: TypeScript (strict mode, exactOptionalPropertyTypes)
+- Git remote: https://github.com/hawk1900-gyy/grok2api.git
