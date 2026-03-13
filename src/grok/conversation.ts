@@ -121,17 +121,17 @@ export function buildConversationPayload(args: {
     };
 
     if (isMultiImage) {
-      // 多图 + @ 引用模式: message 中用 @fileId 引用图片
       message = `${resolveImageReferences(textContent, imgIds)} ${modeFlag}`.trim();
       videoGenModelConfig.isReferenceToVideo = true;
       videoGenModelConfig.imageReferences = assetUrls;
+      console.log(`[payload] MULTI-IMAGE: imgIds=${imgIds.length} assetUrls=${assetUrls.length} message=${message.slice(0, 120)}`);
     } else if (imgIds.length === 1) {
-      // 单图模式: 完整 asset URL 拼在 message 前面
       message = `${assetUrls[0]}  ${textContent} ${modeFlag}`.trim();
       payload.fileAttachments = [imgIds[0]];
+      console.log(`[payload] SINGLE-IMAGE: fileId=${imgIds[0]?.slice(0, 8)} message=${message.slice(0, 120)}`);
     } else {
-      // 无图模式: 纯文本 prompt
       message = `${textContent} ${modeFlag}`.trim();
+      console.log(`[payload] NO-IMAGE: message=${message.slice(0, 120)}`);
     }
 
     payload.message = message;

@@ -144,14 +144,20 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const isVideoModel = Boolean(cfg.is_video_model);
       const MAX_IMAGES = 7;
       const imgInputs = images.slice(0, MAX_IMAGES);
+      console.log(`[multi-img] model=${requestedModel} isVideo=${isVideoModel} extractedImages=${images.length} inputImages=${imgInputs.length}`);
 
       try {
         const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok));
         const imgIds = uploads.map((u) => u.fileId).filter(Boolean);
         const imgUris = uploads.map((u) => u.fileUri).filter(Boolean);
+        console.log(`[multi-img] uploaded=${uploads.length} imgIds=${imgIds.length} imgUris=${imgUris.length}`);
+        if (uploads.length !== imgIds.length) {
+          console.log(`[multi-img] WARNING: some uploads returned empty fileId!`, JSON.stringify(uploads.map(u => ({ id: u.fileId?.slice(0, 8), uri: u.fileUri?.slice(0, 20) }))));
+        }
 
         let postId: string | undefined;
         if (isVideoModel) {
+          console.log(`[multi-img] video path: imgIds.length=${imgIds.length} → ${imgIds.length > 1 ? 'MULTI' : imgIds.length === 1 ? 'SINGLE' : 'NO_IMG'}`);
           if (imgIds.length > 1) {
             // 多图: 创建视频容器 post（parentPostId 与图片 ID 独立）
             const post = await createMediaPost(
