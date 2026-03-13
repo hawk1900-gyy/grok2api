@@ -94,6 +94,7 @@ openAiRoutes.get("/models/:modelId", async (c) => {
 });
 
 openAiRoutes.post("/chat/completions", async (c) => {
+  c.header("X-Build", "20260313a");
   const start = Date.now();
   const ip = getClientIp(c.req.raw);
   const keyName = c.get("apiAuth").name ?? "Unknown";
