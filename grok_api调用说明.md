@@ -45,6 +45,7 @@ POST {BASE_URL}/v1/chat/completions
 ```
 Authorization: Bearer {API_KEY}
 Content-Type: application/json
+X-Token-Suffix: XXXX          # 可选，指定使用后缀匹配的 Grok Token（调试用）
 ```
 
 ---
@@ -429,3 +430,4 @@ download_media(video_url, "video/generated.mp4")
 5. **base_url**：管理后台需正确设置 `base_url`，否则返回的视频 URL 可能无法访问
 6. **额度**：视频生成消耗 Grok Token 额度，可在管理后台查看剩余次数
 7. **图片大小**：base64 编码后体积约增大 33%，注意请求体大小限制
+8. **指定 Token**：请求头加 `X-Token-Suffix: <后缀>` 可强制使用后缀匹配的 Token（多 Token 环境下排查问题时有用）
