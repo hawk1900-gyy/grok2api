@@ -191,6 +191,18 @@ export async function selectBestToken(db: Env["DB"], model: string): Promise<{ t
   return (await pick("sso")) ?? (await pick("ssoSuper")) ?? (await pickLenient("sso")) ?? (await pickLenient("ssoSuper"));
 }
 
+export async function selectTokenBySuffix(
+  db: Env["DB"],
+  suffix: string,
+): Promise<{ token: string; token_type: TokenType } | null> {
+  const row = await dbFirst<{ token: string; token_type: TokenType }>(
+    db,
+    "SELECT token, token_type FROM tokens WHERE token LIKE ? AND status != 'expired' LIMIT 1",
+    [`%${suffix}`],
+  );
+  return row ?? null;
+}
+
 export async function recordTokenSuccess(db: Env["DB"], token: string): Promise<void> {
   await dbRun(
     db,

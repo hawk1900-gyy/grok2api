@@ -9,7 +9,7 @@ import { uploadImage } from "../grok/upload";
 import { createMediaPost, createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { addRequestLog } from "../repo/logs";
-import { applyCooldown, recordTokenFailure, recordTokenSuccess, selectBestToken } from "../repo/tokens";
+import { applyCooldown, recordTokenFailure, recordTokenSuccess, selectBestToken, selectTokenBySuffix } from "../repo/tokens";
 import type { ApiAuthInfo } from "../auth";
 
 function openAiError(message: string, code: string): Record<string, unknown> {
@@ -131,8 +131,12 @@ openAiRoutes.post("/chat/completions", async (c) => {
     const maxRetry = 3;
     let lastErr: string | null = null;
 
+    const forceSuffix = c.req.header("X-Token-Suffix")?.trim() || "";
+
     for (let attempt = 0; attempt < maxRetry; attempt++) {
-      const chosen = await selectBestToken(c.env.DB, requestedModel);
+      const chosen = forceSuffix
+        ? await selectTokenBySuffix(c.env.DB, forceSuffix)
+        : await selectBestToken(c.env.DB, requestedModel);
       if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
 
       const jwt = chosen.token;
@@ -148,6 +152,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
         extractedImages: images.length,
         inputImages: imgInputs.length,
         isVideoModel,
+        tokenSuffix: jwt.slice(-6),
+        forceSuffix: forceSuffix || undefined,
       };
 
       try {
