@@ -47,7 +47,7 @@ openAiRoutes.use(
   "/*",
   cors({
     origin: "*",
-    allowHeaders: ["Authorization", "Content-Type"],
+    allowHeaders: ["Authorization", "Content-Type", "X-Token-Suffix"],
     allowMethods: ["GET", "POST", "OPTIONS"],
     maxAge: 86400,
   }),
@@ -94,7 +94,6 @@ openAiRoutes.get("/models/:modelId", async (c) => {
 });
 
 openAiRoutes.post("/chat/completions", async (c) => {
-  c.header("X-Build", "20260313a");
   const start = Date.now();
   const ip = getClientIp(c.req.raw);
   const keyName = c.get("apiAuth").name ?? "Unknown";
@@ -149,32 +148,14 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const isVideoModel = Boolean(cfg.is_video_model);
       const MAX_IMAGES = 7;
       const imgInputs = images.slice(0, MAX_IMAGES);
-      const _dbg: Record<string, unknown> = {
-        extractedImages: images.length,
-        inputImages: imgInputs.length,
-        isVideoModel,
-        tokenSuffix: jwt.slice(-6),
-        forceSuffix: forceSuffix || undefined,
-      };
 
       try {
         const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok));
         const imgIds = uploads.map((u) => u.fileId).filter(Boolean);
         const imgUris = uploads.map((u) => u.fileUri).filter(Boolean);
-        _dbg.rawUploads = uploads.length;
-        _dbg.imgIds = imgIds.length;
-        _dbg.imgUris = imgUris.length;
-        _dbg.uploadDetails = uploads.map((u, i) => ({
-          idx: i,
-          hasFileId: Boolean(u.fileId),
-          fileIdPrefix: u.fileId?.slice(0, 12) || "(empty)",
-          hasFileUri: Boolean(u.fileUri),
-        }));
 
         let postId: string | undefined;
         if (isVideoModel) {
-          const branch = imgIds.length > 1 ? "MULTI" : imgIds.length === 1 ? "SINGLE" : "NO_IMG";
-          _dbg.videoBranch = branch;
           if (imgIds.length > 1) {
             // 多图: 创建视频容器 post（parentPostId 与图片 ID 独立）
             const post = await createMediaPost(
@@ -207,10 +188,6 @@ openAiRoutes.post("/chat/completions", async (c) => {
           settings: settingsBundle.grok,
           videoConfig,
         });
-        _dbg.grokMessage = String(payload.message ?? "").slice(0, 300);
-        _dbg.imgIdOrder = imgIds.map((id) => id.slice(0, 12));
-        _dbg.contentPreview = content.slice(0, 100);
-        _dbg.hasAtRef = /\@图\d/.test(content);
 
         const upstream = await sendConversationRequest({
           payload,
@@ -268,7 +245,6 @@ openAiRoutes.post("/chat/completions", async (c) => {
           origin,
           requestedModel,
         });
-        const result = { ...json, _debug: _dbg };
 
         const duration = (Date.now() - start) / 1000;
         addRequestLog(c.env.DB, {
@@ -281,7 +257,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           error: "",
         }).catch(() => {});
 
-        return c.json(result);
+        return c.json(json);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         lastErr = msg;

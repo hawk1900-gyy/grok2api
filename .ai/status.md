@@ -1,9 +1,9 @@
 # Current Session
 
 - **Date**: 2026-03-13
-- **Goal**: Grok 多图上传 + @引用 支持
-- **Phase**: 多图 + @引用支持已完成
-- **Context**: Grok Imagine 视频模式支持多图（最多 7 张）和 @ 引用。通过手动抓包分析 conversations/new payload，确认了 Grok 内部的多图引用格式并完成 grok2api 改造。
+- **Goal**: Grok 多图上传 + @引用 支持（已完成并验证部署）
+- **Phase**: 全部完成
+- **Context**: Grok Imagine 视频模式支持多图（最多 7 张）和 @ 引用。通过手动抓包分析 conversations/new payload，确认了 Grok 内部的多图引用格式并完成 grok2api 改造。本地与远程部署均已验证通过。
 
 # Completed
 
@@ -22,18 +22,22 @@
 - [x] 视频模型 payload 重构：单图=asset URL 拼 message + fileAttachments；多图=@fileId 引用 + isReferenceToVideo + imageReferences
 - [x] 修复 videoResolution → resolutionName（"480p"/"720p" 替代 "SD"/"HD"）
 - [x] 默认 aspectRatio 改为 "2:3"（与 Grok 网页端一致）
+- [x] 修复 mapLimit 并发上传顺序 bug（改为按索引赋值，保证结果数组与输入顺序一致）
+- [x] 新增 X-Token-Suffix 请求头：可指定 token 后缀强制使用特定 token（调试/测试用）
+- [x] 新增 selectTokenBySuffix()：按 token 后缀精确查询（repo/tokens.ts）
+- [x] addRequestLog 改为 fire-and-forget（.catch），避免日志写入失败阻塞主流程
+- [x] 本地测试：多图视频生成验证通过
+- [x] 远程部署测试：多图视频生成验证通过（Cloudflare Workers）
 
 # Todo
 
 - [ ] 监控：确认 token-owner 记忆命中率在生产环境表现
 - [ ] 待观察：视频下载偶尔超时问题（网络层面，非代码问题）
-- [x] 本地测试：多图视频生成（3 张图 + @图N 引用，wrangler dev 验证通过）
-- [x] 本地测试：单图视频生成（resolutionName 兼容性验证通过）
-- [ ] 部署测试：推送到 Cloudflare Workers 后验证多图/单图视频生成
 
 # Notes
 
-- Git remote 已从 `iptag/grok2api` 更新为 `hawk1900-gyy/grok2api`
+- Git remote: `hawk1900-gyy/grok2api`
 - 部署方式：push 到 main → GitHub Actions → Deploy to Cloudflare Workers
 - 后台地址：https://grok2api.hawk-bc-1900.workers.dev/admin
 - token-owner 映射 KV 键格式：`tok-own:<grok-user-uuid>`，TTL 7 天
+- 部署排查教训：GitHub Actions 步骤 6 (Ensure D1+KV) 偶发 Cloudflare API 失败会导致 Deploy Worker 被跳过，需检查每个步骤状态而非仅看整体 conclusion

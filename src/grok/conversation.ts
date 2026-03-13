@@ -121,18 +121,14 @@ export function buildConversationPayload(args: {
     };
 
     if (isMultiImage) {
-      const resolvedText = resolveImageReferences(textContent, imgIds);
-      message = `${resolvedText} ${modeFlag}`.trim();
+      message = `${resolveImageReferences(textContent, imgIds)} ${modeFlag}`.trim();
       videoGenModelConfig.isReferenceToVideo = true;
       videoGenModelConfig.imageReferences = assetUrls;
-      console.log(`[payload] MULTI before=${textContent.slice(0, 80)} after=${resolvedText.slice(0, 80)} ids=${imgIds.map(id => id.slice(0, 8))}`);
     } else if (imgIds.length === 1) {
       message = `${assetUrls[0]}  ${textContent} ${modeFlag}`.trim();
       payload.fileAttachments = [imgIds[0]];
-      console.log(`[payload] SINGLE-IMAGE: fileId=${imgIds[0]?.slice(0, 8)} message=${message.slice(0, 120)}`);
     } else {
       message = `${textContent} ${modeFlag}`.trim();
-      console.log(`[payload] NO-IMAGE: message=${message.slice(0, 120)}`);
     }
 
     payload.message = message;
