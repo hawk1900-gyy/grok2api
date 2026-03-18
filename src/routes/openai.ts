@@ -47,7 +47,7 @@ openAiRoutes.use(
   "/*",
   cors({
     origin: "*",
-    allowHeaders: ["Authorization", "Content-Type", "X-Token-Suffix", "X-Raw-Token"],
+    allowHeaders: ["Authorization", "Content-Type", "X-Token-Suffix", "X-Raw-Token", "X-Cf-Clearance"],
     allowMethods: ["GET", "POST", "OPTIONS"],
     maxAge: 86400,
   }),
@@ -149,7 +149,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
         jwt = chosen.token;
       }
 
-      const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+      const cfHeader = c.req.header("X-Cf-Clearance")?.trim() || "";
+      const cfValue = cfHeader || settingsBundle.grok.cf_clearance || "";
+      const cf = normalizeCfCookie(cfValue);
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
       const { content, images } = extractContent(body.messages as any);
