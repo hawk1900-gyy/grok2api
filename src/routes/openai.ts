@@ -47,7 +47,7 @@ openAiRoutes.use(
   "/*",
   cors({
     origin: "*",
-    allowHeaders: ["Authorization", "Content-Type", "X-Token-Suffix"],
+    allowHeaders: ["Authorization", "Content-Type", "X-Token-Suffix", "X-Raw-Token"],
     allowMethods: ["GET", "POST", "OPTIONS"],
     maxAge: 86400,
   }),
@@ -132,14 +132,23 @@ openAiRoutes.post("/chat/completions", async (c) => {
     let lastErr: string | null = null;
 
     const forceSuffix = c.req.header("X-Token-Suffix")?.trim() || "";
+    const rawToken = c.req.header("X-Raw-Token")?.trim() || "";
 
     for (let attempt = 0; attempt < maxRetry; attempt++) {
-      const chosen = forceSuffix
-        ? await selectTokenBySuffix(c.env.DB, forceSuffix)
-        : await selectBestToken(c.env.DB, requestedModel);
-      if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+      let jwt: string;
+      let isRawToken = false;
 
-      const jwt = chosen.token;
+      if (rawToken) {
+        jwt = rawToken.startsWith("sso=") ? rawToken.slice(4) : rawToken;
+        isRawToken = true;
+      } else {
+        const chosen = forceSuffix
+          ? await selectTokenBySuffix(c.env.DB, forceSuffix)
+          : await selectBestToken(c.env.DB, requestedModel);
+        if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+        jwt = chosen.token;
+      }
+
       const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
@@ -199,13 +208,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
         if (!upstream.ok) {
           const txt = await upstream.text().catch(() => "");
           lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
-          await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
-          await applyCooldown(c.env.DB, jwt, upstream.status);
+          if (!isRawToken) {
+            await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
+            await applyCooldown(c.env.DB, jwt, upstream.status);
+          }
           if (retryCodes.includes(upstream.status) && attempt < maxRetry - 1) continue;
           break;
         }
 
-        await recordTokenSuccess(c.env.DB, jwt);
+        if (!isRawToken) await recordTokenSuccess(c.env.DB, jwt);
 
         if (stream) {
           const sse = createOpenAiStreamFromGrokNdjson(upstream, {
@@ -261,14 +272,16 @@ openAiRoutes.post("/chat/completions", async (c) => {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         lastErr = msg;
-        await recordTokenFailure(c.env.DB, jwt, 500, msg);
-        await applyCooldown(c.env.DB, jwt, 500);
+        if (!isRawToken) {
+          await recordTokenFailure(c.env.DB, jwt, 500, msg).catch(() => {});
+          await applyCooldown(c.env.DB, jwt, 500).catch(() => {});
+        }
         if (attempt < maxRetry - 1) continue;
       }
     }
 
     const duration = (Date.now() - start) / 1000;
-    await addRequestLog(c.env.DB, {
+    addRequestLog(c.env.DB, {
       ip,
       model: requestedModel,
       duration: Number(duration.toFixed(2)),
@@ -276,21 +289,22 @@ openAiRoutes.post("/chat/completions", async (c) => {
       key_name: keyName,
       token_suffix: "",
       error: lastErr ?? "unknown_error",
-    });
+    }).catch(() => {});
 
     return c.json(openAiError(lastErr ?? "Upstream error", "upstream_error"), 500);
   } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e);
     const duration = (Date.now() - start) / 1000;
-    await addRequestLog(c.env.DB, {
+    addRequestLog(c.env.DB, {
       ip,
       model: requestedModel || "unknown",
       duration: Number(duration.toFixed(2)),
       status: 500,
       key_name: keyName,
       token_suffix: "",
-      error: e instanceof Error ? e.message : String(e),
-    });
-    return c.json(openAiError("Internal error", "internal_error"), 500);
+      error: errMsg,
+    }).catch(() => {});
+    return c.json(openAiError(`Internal error: ${errMsg}`, "internal_error"), 500);
   }
 });
 
