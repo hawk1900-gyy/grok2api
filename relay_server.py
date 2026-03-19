@@ -167,34 +167,40 @@ def relay_forward():
 
     debug_print(f"relay_server: 转发 {method} {target_url} (body {len(body)} bytes)")
 
-    proxy_list = _load_proxy_list()
+    # 只有 conversations/new 需要住宅代理（anti-bot），其他端点 VPS 直连即可
+    need_proxy = "/conversations/new" in target_url
+
     upstream = None
     used_proxy = None
 
-    for px in proxy_list:
-        px_url = px["proxy"].strip()
-        px_name = px.get("name", px_url)
-        debug_print(f"relay_server: 尝试代理 [{px_name}]")
-        resp, err = _do_request(method, target_url, headers, body, proxy_url=px_url)
-        if err:
-            debug_print(f"Warning:relay_server: 代理 [{px_name}] 连接失败: {err}")
-            continue
-        if resp.status_code == 403:
-            debug_print(f"Warning:relay_server: 代理 [{px_name}] 被 anti-bot 拦截 (403)")
-            continue
-        upstream = resp
-        used_proxy = px_name
-        break
+    if need_proxy:
+        proxy_list = _load_proxy_list()
+        for px in proxy_list:
+            px_url = px["proxy"].strip()
+            px_name = px.get("name", px_url)
+            debug_print(f"relay_server: 尝试代理 [{px_name}]")
+            resp, err = _do_request(method, target_url, headers, body, proxy_url=px_url)
+            if err:
+                debug_print(f"Warning:relay_server: 代理 [{px_name}] 连接失败: {err}")
+                continue
+            if resp.status_code == 403:
+                debug_print(f"Warning:relay_server: 代理 [{px_name}] 被 anti-bot 拦截 (403)")
+                continue
+            upstream = resp
+            used_proxy = px_name
+            break
+        if upstream is None and proxy_list:
+            debug_print("Error:relay_server: 所有代理均失败，回退到 VPS 直连")
+    else:
+        debug_print(f"relay_server: 非 anti-bot 端点，VPS 直连 (省住宅代理流量)")
 
     if upstream is None:
-        if proxy_list:
-            debug_print("Error:relay_server: 所有代理均失败，回退到 VPS 直连")
         resp, err = _do_request(method, target_url, headers, body)
         if err:
             debug_print(f"Error:relay_server: VPS 直连也失败: {err}")
             return jsonify({"error": f"upstream request failed: {err}"}), 502
         upstream = resp
-        used_proxy = "直连(VPS自身IP)"
+        used_proxy = used_proxy or "直连(VPS自身IP)"
 
     debug_print(f"relay_server: 上游响应 HTTP {upstream.status_code} (via {used_proxy})")
 
