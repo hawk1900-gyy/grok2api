@@ -12,6 +12,7 @@ import sys
 
 # ── 服务器配置 ──────────────────────────────────────────────
 # 预设环境：local = 本地 wrangler dev，remote = Cloudflare Workers 线上
+# eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiMWFhODUyMTQtZTcwOC00NGEwLTkzM2EtZjNlMDkxZjU3ZDdmIn0.nvb9uuBf5s0GMPYH3e5sYH9nli7sr6hAbxAqQp9PBYY
 SERVERS = {
     "local": {
         "name": "本地 (wrangler dev)",
@@ -29,6 +30,12 @@ SERVERS = {
 BASE_URL = ""
 API_KEY = ""
 
+# ── X-Raw-Token 模式 ─────────────────────────────────────────
+# 填入 SSO token 后，选择 raw-token 模式可绕过数据库 token 选择，直接用此 token 请求
+# 格式：JWT 字符串（不带 sso= 前缀）
+X_RAW_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiMWFhODUyMTQtZTcwOC00NGEwLTkzM2EtZjNlMDkxZjU3ZDdmIn0.nvb9uuBf5s0GMPYH3e5sYH9nli7sr6hAbxAqQp9PBYY"
+USE_RAW_TOKEN = False
+
 
 # 本地图片路径（相对于脚本所在目录）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,15 +48,18 @@ VIDEO_MODELS = ["grok-imagine-0.9", "grok-imagine-1.0-video"]
 
 
 def _headers():
-    """请求头，必须带 Authorization"""
+    """请求头，必须带 Authorization；USE_RAW_TOKEN 时附加 X-Raw-Token"""
     if not API_KEY:
         print("[错误] 请设置 GROK2API_API_KEY 环境变量，或在脚本中填入 API_KEY")
         sys.exit(1)
-    return {
+    h = {
         "Authorization": f"Bearer {API_KEY.strip()}",
         "Content-Type": "application/json",
         "User-Agent": "Grok2API-Python/1.0",
     }
+    if USE_RAW_TOKEN and X_RAW_TOKEN:
+        h["X-Raw-Token"] = X_RAW_TOKEN.strip()
+    return h
 
 
 def _do_request(req, timeout: int = 30):
@@ -367,9 +377,27 @@ def _select_server() -> bool:
     return False
 
 
+def _ask_raw_token():
+    """询问是否启用 X-Raw-Token 模式"""
+    global USE_RAW_TOKEN
+    if not X_RAW_TOKEN:
+        return
+    short = X_RAW_TOKEN[-12:] if len(X_RAW_TOKEN) > 12 else X_RAW_TOKEN
+    try:
+        s = input(f"启用 X-Raw-Token 模式？(y/n，回车=n) [token: ...{short}]: ").strip().lower()
+        if s == "y":
+            USE_RAW_TOKEN = True
+            print(f"  → X-Raw-Token 已启用（绕过数据库 token 选择）")
+        else:
+            print(f"  → 使用数据库 token")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def main():
     if not _select_server():
         return
+    _ask_raw_token()
     print("-" * 50)
 
     # 1. 获取模型列表
@@ -414,6 +442,7 @@ if __name__ == "__main__":
     #   python grok_example.py                  # 交互式选择服务器
     #   python grok_example.py --local          # 直接用本地环境
     #   python grok_example.py --remote         # 直接用远程环境
+    #   python grok_example.py --local --raw    # 本地 + X-Raw-Token 模式
     #   python grok_example.py <URL> [保存路径] # 直接下载媒体文件
     args = sys.argv[1:]
 
@@ -423,9 +452,13 @@ if __name__ == "__main__":
         print(f"下载: {url}")
         download_media(url, save_path)
     else:
-        shortcut = next((a.lstrip("-") for a in args if a.startswith("--")), None)
-        if shortcut and shortcut in SERVERS:
+        flags = [a.lstrip("-") for a in args if a.startswith("--")]
+        shortcut = next((f for f in flags if f in SERVERS), None)
+        if shortcut:
             BASE_URL = SERVERS[shortcut]["base_url"]
             API_KEY = SERVERS[shortcut]["api_key"]
             print(f"→ {SERVERS[shortcut]['name']}: {BASE_URL}\n")
+        if "raw" in flags:
+            USE_RAW_TOKEN = True
+            print(f"→ X-Raw-Token 模式已启用\n")
         main()

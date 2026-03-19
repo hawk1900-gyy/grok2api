@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { requireAdminAuth } from "../auth";
-import { getSettings, saveSettings, normalizeCfCookie } from "../settings";
+import { getSettings, saveSettings, normalizeCfCookie, getRelaySettings, saveRelaySettings } from "../settings";
+import type { RelayServer, RelaySettings } from "../settings";
 import { ensureTosAndNsfw } from "../grok/accountSettings";
 import {
   addApiKey,
@@ -416,6 +417,7 @@ adminRoutes.get("/api/stats", requireAdminAuth, async (c) => {
       const total = tokens.length;
       const expired = tokens.filter((t) => t.status === "expired").length;
       let cooldown = 0;
+      let video_cooldown = 0;
       let exhausted = 0;
       let unused = 0;
       let active = 0;
@@ -425,6 +427,10 @@ adminRoutes.get("/api/stats", requireAdminAuth, async (c) => {
         if (t.cooldown_until && t.cooldown_until > now) {
           cooldown += 1;
           continue;
+        }
+
+        if (t.video_cooldown_until && t.video_cooldown_until > now) {
+          video_cooldown += 1;
         }
 
         const isUnused = type === "ssoSuper" ? t.remaining_queries === -1 && t.heavy_remaining_queries === -1 : t.remaining_queries === -1;
@@ -441,7 +447,7 @@ adminRoutes.get("/api/stats", requireAdminAuth, async (c) => {
         active += 1;
       }
 
-      return { total, expired, active, cooldown, exhausted, unused };
+      return { total, expired, active, cooldown, video_cooldown, exhausted, unused };
     };
 
     const normal = calc("sso");
@@ -668,5 +674,138 @@ adminRoutes.post("/api/logs/add", requireAdminAuth, async (c) => {
     return c.json({ success: true });
   } catch (e) {
     return c.json(jsonError(`写入失败: ${e instanceof Error ? e.message : String(e)}`, "LOG_ADD_ERROR"), 500);
+  }
+});
+
+// ── Relay 中转管理 ──────────────────────────────────────────
+
+adminRoutes.get("/api/relay", requireAdminAuth, async (c) => {
+  try {
+    const relay = await getRelaySettings(c.env);
+    return c.json({ success: true, data: relay });
+  } catch (e) {
+    return c.json(jsonError(`读取失败: ${e instanceof Error ? e.message : String(e)}`, "RELAY_READ_ERROR"), 500);
+  }
+});
+
+adminRoutes.post("/api/relay", requireAdminAuth, async (c) => {
+  try {
+    const body = (await c.req.json()) as Partial<RelaySettings>;
+    const current = await getRelaySettings(c.env);
+    const next: RelaySettings = {
+      enabled: typeof body.enabled === "boolean" ? body.enabled : current.enabled,
+      servers: Array.isArray(body.servers) ? body.servers : current.servers,
+    };
+    await saveRelaySettings(c.env, next);
+    return c.json({ success: true, data: next });
+  } catch (e) {
+    return c.json(jsonError(`保存失败: ${e instanceof Error ? e.message : String(e)}`, "RELAY_SAVE_ERROR"), 500);
+  }
+});
+
+adminRoutes.post("/api/relay/add", requireAdminAuth, async (c) => {
+  try {
+    const body = (await c.req.json()) as Partial<RelayServer>;
+    if (!body.url?.trim()) return c.json(jsonError("URL 不能为空", "RELAY_URL_REQUIRED"), 400);
+    if (!body.secret?.trim()) return c.json(jsonError("Secret 不能为空", "RELAY_SECRET_REQUIRED"), 400);
+
+    const current = await getRelaySettings(c.env);
+    const server: RelayServer = {
+      id: crypto.randomUUID(),
+      name: (body.name ?? "").trim() || "未命名",
+      url: body.url.trim().replace(/\/+$/, ""),
+      secret: body.secret.trim(),
+      is_active: body.is_active !== false,
+      priority: typeof body.priority === "number" ? body.priority : current.servers.length,
+      note: (body.note ?? "").trim(),
+    };
+    current.servers.push(server);
+    await saveRelaySettings(c.env, current);
+    return c.json({ success: true, data: server });
+  } catch (e) {
+    return c.json(jsonError(`添加失败: ${e instanceof Error ? e.message : String(e)}`, "RELAY_ADD_ERROR"), 500);
+  }
+});
+
+adminRoutes.post("/api/relay/update", requireAdminAuth, async (c) => {
+  try {
+    const body = (await c.req.json()) as Partial<RelayServer> & { id: string };
+    if (!body.id) return c.json(jsonError("缺少 id", "RELAY_ID_REQUIRED"), 400);
+
+    const current = await getRelaySettings(c.env);
+    const idx = current.servers.findIndex((s) => s.id === body.id);
+    if (idx === -1) return c.json(jsonError("服务器不存在", "RELAY_NOT_FOUND"), 404);
+
+    const s = current.servers[idx]!;
+    if (body.name !== undefined) s.name = body.name.trim();
+    if (body.url !== undefined) s.url = body.url.trim().replace(/\/+$/, "");
+    if (body.secret !== undefined) s.secret = body.secret.trim();
+    if (typeof body.is_active === "boolean") s.is_active = body.is_active;
+    if (typeof body.priority === "number") s.priority = body.priority;
+    if (body.note !== undefined) s.note = body.note.trim();
+
+    await saveRelaySettings(c.env, current);
+    return c.json({ success: true, data: s });
+  } catch (e) {
+    return c.json(jsonError(`更新失败: ${e instanceof Error ? e.message : String(e)}`, "RELAY_UPDATE_ERROR"), 500);
+  }
+});
+
+adminRoutes.post("/api/relay/delete", requireAdminAuth, async (c) => {
+  try {
+    const { id } = (await c.req.json()) as { id?: string };
+    if (!id) return c.json(jsonError("缺少 id", "RELAY_ID_REQUIRED"), 400);
+
+    const current = await getRelaySettings(c.env);
+    const before = current.servers.length;
+    current.servers = current.servers.filter((s) => s.id !== id);
+    if (current.servers.length === before) return c.json(jsonError("服务器不存在", "RELAY_NOT_FOUND"), 404);
+
+    await saveRelaySettings(c.env, current);
+    return c.json({ success: true });
+  } catch (e) {
+    return c.json(jsonError(`删除失败: ${e instanceof Error ? e.message : String(e)}`, "RELAY_DELETE_ERROR"), 500);
+  }
+});
+
+adminRoutes.post("/api/relay/test", requireAdminAuth, async (c) => {
+  try {
+    const { id } = (await c.req.json()) as { id?: string };
+    if (!id) return c.json(jsonError("缺少 id", "RELAY_ID_REQUIRED"), 400);
+
+    const current = await getRelaySettings(c.env);
+    const server = current.servers.find((s) => s.id === id);
+    if (!server) return c.json(jsonError("服务器不存在", "RELAY_NOT_FOUND"), 404);
+
+    const start = Date.now();
+    try {
+      const resp = await fetch(`${server.url}/relay/ping`, {
+        method: "GET",
+        headers: { "X-Relay-Secret": server.secret },
+      });
+      const elapsed = Date.now() - start;
+      const ok = resp.ok;
+      const body = await resp.text().catch(() => "");
+
+      server.last_check_time = Date.now();
+      server.last_check_ok = ok;
+      await saveRelaySettings(c.env, current);
+
+      return c.json({
+        success: true,
+        data: { ok, status: resp.status, elapsed_ms: elapsed, body: body.slice(0, 500) },
+      });
+    } catch (fetchErr) {
+      server.last_check_time = Date.now();
+      server.last_check_ok = false;
+      await saveRelaySettings(c.env, current);
+
+      return c.json({
+        success: true,
+        data: { ok: false, status: 0, elapsed_ms: Date.now() - start, error: String(fetchErr) },
+      });
+    }
+  } catch (e) {
+    return c.json(jsonError(`测试失败: ${e instanceof Error ? e.message : String(e)}`, "RELAY_TEST_ERROR"), 500);
   }
 });

@@ -14,6 +14,7 @@ export interface TokenRow {
   tags: string; // JSON string
   note: string;
   cooldown_until: number | null;
+  video_cooldown_until: number | null;
   last_failure_time: number | null;
   last_failure_reason: string | null;
   failed_count: number;
@@ -40,15 +41,22 @@ export function tokenRowToInfo(row: TokenRow): {
   tags: string[];
   note: string;
   cooldown_until: number | null;
+  video_cooldown_until: number | null;
   last_failure_time: number | null;
   last_failure_reason: string;
   limit_reason: string;
   cooldown_remaining: number;
+  video_cooldown_remaining: number;
 } {
   const now = nowMs();
   const cooldownRemainingMs =
     row.cooldown_until && row.cooldown_until > now ? row.cooldown_until - now : 0;
   const cooldown_remaining = cooldownRemainingMs ? Math.floor((cooldownRemainingMs + 999) / 1000) : 0;
+
+  const videoCooldownRemainingMs =
+    row.video_cooldown_until && row.video_cooldown_until > now ? row.video_cooldown_until - now : 0;
+  const video_cooldown_remaining = videoCooldownRemainingMs ? Math.floor((videoCooldownRemainingMs + 999) / 1000) : 0;
+
   const limit_reason = cooldownRemainingMs
     ? "cooldown"
     : row.token_type === "ssoSuper"
@@ -65,10 +73,12 @@ export function tokenRowToInfo(row: TokenRow): {
     if (row.token_type === "ssoSuper") {
       if (row.remaining_queries === -1 && row.heavy_remaining_queries === -1) return "未使用";
       if (row.remaining_queries === 0 || row.heavy_remaining_queries === 0) return "额度耗尽";
+      if (videoCooldownRemainingMs) return "视频冷却";
       return "正常";
     }
     if (row.remaining_queries === -1) return "未使用";
     if (row.remaining_queries === 0) return "额度耗尽";
+    if (videoCooldownRemainingMs) return "视频冷却";
     return "正常";
   })();
 
@@ -82,17 +92,19 @@ export function tokenRowToInfo(row: TokenRow): {
     tags: parseTags(row.tags),
     note: row.note ?? "",
     cooldown_until: row.cooldown_until,
+    video_cooldown_until: row.video_cooldown_until,
     last_failure_time: row.last_failure_time,
     last_failure_reason: row.last_failure_reason ?? "",
     limit_reason,
     cooldown_remaining,
+    video_cooldown_remaining,
   };
 }
 
 export async function listTokens(db: Env["DB"]): Promise<TokenRow[]> {
   return dbAll<TokenRow>(
     db,
-    "SELECT token, token_type, created_time, remaining_queries, heavy_remaining_queries, status, tags, note, cooldown_until, last_failure_time, last_failure_reason, failed_count FROM tokens ORDER BY created_time DESC",
+    "SELECT token, token_type, created_time, remaining_queries, heavy_remaining_queries, status, tags, note, cooldown_until, video_cooldown_until, last_failure_time, last_failure_reason, failed_count FROM tokens ORDER BY created_time DESC",
   );
 }
 
@@ -147,10 +159,12 @@ export async function getAllTags(db: Env["DB"]): Promise<string[]> {
   return [...set].sort();
 }
 
-export async function selectBestToken(db: Env["DB"], model: string): Promise<{ token: string; token_type: TokenType } | null> {
+export async function selectBestToken(db: Env["DB"], model: string, isVideo = false): Promise<{ token: string; token_type: TokenType } | null> {
   const now = nowMs();
   const isHeavy = model === "grok-4-heavy";
   const field = isHeavy ? "heavy_remaining_queries" : "remaining_queries";
+  const videoFilter = isVideo ? "AND (video_cooldown_until IS NULL OR video_cooldown_until <= ?)" : "";
+  const videoParam = isVideo ? [now] : [];
 
   const pick = async (token_type: TokenType): Promise<{ token: string; token_type: TokenType } | null> => {
     const row = await dbFirst<{ token: string }>(
@@ -160,25 +174,26 @@ export async function selectBestToken(db: Env["DB"], model: string): Promise<{ t
          AND status != 'expired'
          AND failed_count < ?
          AND (cooldown_until IS NULL OR cooldown_until <= ?)
+         ${videoFilter}
          AND ${field} != 0
        ORDER BY CASE WHEN ${field} = -1 THEN 0 ELSE 1 END, ${field} DESC, RANDOM()
        LIMIT 1`,
-      [token_type, MAX_FAILURES, now],
+      [token_type, MAX_FAILURES, now, ...videoParam],
     );
     return row ? { token: row.token, token_type } : null;
   };
 
-  // 降级查询：忽略 failed_count 和 cooldown，只排除 expired
   const pickLenient = async (token_type: TokenType): Promise<{ token: string; token_type: TokenType } | null> => {
     const row = await dbFirst<{ token: string }>(
       db,
       `SELECT token FROM tokens
        WHERE token_type = ?
          AND status != 'expired'
+         ${videoFilter}
          AND ${field} != 0
        ORDER BY failed_count ASC, RANDOM()
        LIMIT 1`,
-      [token_type],
+      [token_type, ...videoParam],
     );
     if (row) {
       await dbRun(db, "UPDATE tokens SET failed_count = 0, cooldown_until = NULL WHERE token = ?", [row.token]);
@@ -248,14 +263,20 @@ export async function applyCooldown(db: Env["DB"], token: string, status: number
   await dbRun(db, "UPDATE tokens SET cooldown_until = ? WHERE token = ?", [until, token]);
 }
 
+export async function applyVideoCooldown(db: Env["DB"], token: string): Promise<void> {
+  const now = nowMs();
+  const until = now + 7200 * 1000; // 2小时窗口
+  await dbRun(db, "UPDATE tokens SET video_cooldown_until = ? WHERE token = ?", [until, token]);
+}
+
 export async function resetAllTokenStates(db: Env["DB"]): Promise<number> {
   const result = await dbFirst<{ c: number }>(
     db,
-    "SELECT COUNT(1) as c FROM tokens WHERE failed_count > 0 OR status = 'expired' OR cooldown_until IS NOT NULL",
+    "SELECT COUNT(1) as c FROM tokens WHERE failed_count > 0 OR status = 'expired' OR cooldown_until IS NOT NULL OR video_cooldown_until IS NOT NULL",
   );
   await dbRun(
     db,
-    "UPDATE tokens SET failed_count = 0, cooldown_until = NULL, status = 'active'",
+    "UPDATE tokens SET failed_count = 0, cooldown_until = NULL, video_cooldown_until = NULL, status = 'active'",
   );
   return result?.c ?? 0;
 }

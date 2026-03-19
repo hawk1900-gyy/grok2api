@@ -212,6 +212,8 @@
           class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">缓存预览</button>
         <button onclick="switchTab('settings')" id="tabSettings"
           class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">Setting 配置</button>
+        <button onclick="switchTab('relay')" id="tabRelay"
+          class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">中转管理</button>
       </nav>
     </div>
 
@@ -238,7 +240,7 @@
           <p class="text-sm font-medium text-muted-foreground mb-2">Token 限流中</p>
           <h3 class="text-xl font-bold text-orange-600" id="statLimited">-</h3>
           <p class="text-xs text-muted-foreground mt-2">
-            冷却 <span id="statCooldown">-</span> · 耗尽 <span id="statExhausted">-</span>
+            冷却 <span id="statCooldown">-</span> · 视频冷却 <span id="statVideoCooldown">-</span> · 耗尽 <span id="statExhausted">-</span>
           </p>
         </div>
 
@@ -280,6 +282,7 @@
                 <option value="all">全部状态</option>
                 <option value="未使用">未使用</option>
                 <option value="冷却中">冷却中</option>
+                <option value="视频冷却">视频冷却</option>
                 <option value="额度耗尽">额度耗尽</option>
                 <option value="失效">失效</option>
                 <option value="正常">正常</option>
@@ -865,6 +868,92 @@
         </div>
       </div>
     </div>
+
+    <!-- 中转管理面板 -->
+    <div id="panelRelay" class="hidden">
+      <div class="flex items-center justify-between mb-6">
+        <h2 class="text-xl font-bold">中转管理</h2>
+        <div class="flex gap-3 items-center">
+          <label class="inline-flex items-center gap-2 cursor-pointer">
+            <span class="text-sm font-medium">启用中转</span>
+            <div class="relative">
+              <input type="checkbox" id="relayEnabledToggle" class="sr-only peer" onchange="toggleRelayEnabled()">
+              <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+            </div>
+          </label>
+          <button onclick="showAddRelayModal()"
+            class="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 transition-colors">
+            <svg class="h-4 w-4 mr-1.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            添加服务器
+          </button>
+        </div>
+      </div>
+
+      <div class="rounded border border-blue-300 bg-blue-50 px-4 py-3 mb-6">
+        <div class="text-xs text-gray-800 leading-relaxed">
+          <div class="text-sm font-medium text-gray-900 mb-1">中转说明</div>
+          <div class="space-y-1">
+            <div>中转功能用于将 conversations/new 请求通过 VPS 中转服务器转发到 grok.com，绕过 Cloudflare 对 CF Worker IP 的拦截。</div>
+            <div>仅 conversations/new 接口走中转，图片上传、rate-limits 等接口不受影响。</div>
+            <div>优先级数值越小，优先使用。多个活跃服务器时自动选择优先级最高的。</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="relayServerList" class="space-y-4">
+        <div class="text-center text-muted-foreground py-8">加载中...</div>
+      </div>
+    </div>
+
+    <!-- 添加/编辑中转服务器模态框 -->
+    <div id="relayModal" class="hidden fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+      <div class="bg-background rounded-lg border border-border w-full max-w-md shadow-xl">
+        <div class="flex items-center justify-between p-5 border-b border-border">
+          <h3 id="relayModalTitle" class="text-lg font-semibold">添加中转服务器</h3>
+          <button onclick="closeRelayModal()" class="text-muted-foreground hover:text-foreground transition-colors">
+            <svg class="h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="p-5 space-y-4">
+          <input type="hidden" id="relayEditId" value="">
+          <div class="space-y-2">
+            <label class="text-sm font-medium text-muted-foreground">名称</label>
+            <input id="relayName" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring" placeholder="例如: 日本VPS">
+          </div>
+          <div class="space-y-2">
+            <label class="text-sm font-medium text-muted-foreground">URL <span class="text-red-500">*</span></label>
+            <input id="relayUrl" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring" placeholder="http://1.2.3.4:5100">
+          </div>
+          <div class="space-y-2">
+            <label class="text-sm font-medium text-muted-foreground">Secret <span class="text-red-500">*</span></label>
+            <input id="relaySecret" type="password" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring" placeholder="共享密钥">
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="space-y-2">
+              <label class="text-sm font-medium text-muted-foreground">优先级</label>
+              <input id="relayPriority" type="number" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring" value="0" min="0">
+            </div>
+            <div class="space-y-2">
+              <label class="text-sm font-medium text-muted-foreground">状态</label>
+              <select id="relayActive" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring">
+                <option value="true">启用</option>
+                <option value="false">禁用</option>
+              </select>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <label class="text-sm font-medium text-muted-foreground">备注</label>
+            <input id="relayNote" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring" placeholder="可选备注">
+          </div>
+        </div>
+        <div class="flex items-center justify-end gap-3 p-5 border-t border-border bg-muted/30">
+          <button onclick="closeRelayModal()"
+            class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors border border-input bg-background hover:bg-accent h-9 px-5">取消</button>
+          <button onclick="submitRelay()"
+            class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-5">确认</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <!-- 编辑信息模态框 -->
@@ -1111,7 +1200,7 @@
     const logout = () => { localStorage.removeItem('adminToken'); window.location.href = '/login' };
 
     const switchTab = (target) => {
-      ['tokens', 'statistics', 'keys', 'logs', 'cache', 'settings'].forEach(name => {
+      ['tokens', 'statistics', 'keys', 'logs', 'cache', 'settings', 'relay'].forEach(name => {
         const cap = name.charAt(0).toUpperCase() + name.slice(1);
         const active = name === target;
         const panel = $(`panel${cap}`);
@@ -1131,6 +1220,7 @@
       if (target === 'statistics') loadRequestStats();
       if (target === 'keys') loadKeys();
       if (target === 'logs') loadLogs();
+      if (target === 'relay') loadRelaySettings();
     };
 
     // --- Key 管理 ---
@@ -1403,6 +1493,7 @@
           $('statLimited').textContent = sum('limited');
           $('statExpired').textContent = sum('expired');
           $('statCooldown').textContent = sum('cooldown');
+          $('statVideoCooldown').textContent = sum('video_cooldown');
           $('statExhausted').textContent = sum('exhausted');
         }
       } catch (e) { console.error('加载统计失败:', e) }
@@ -1420,6 +1511,8 @@
             note: t.note || '',
             cooldown_remaining: t.cooldown_remaining || 0,
             cooldown_until: t.cooldown_until || null,
+            video_cooldown_remaining: t.video_cooldown_remaining || 0,
+            video_cooldown_until: t.video_cooldown_until || null,
             last_failure_time: t.last_failure_time || null,
             last_failure_reason: t.last_failure_reason || '',
             limit_reason: t.limit_reason || ''
@@ -1456,6 +1549,7 @@
       const ss = {
         '未使用': 'bg-muted text-muted-foreground',
         '冷却中': 'bg-orange-50 text-orange-700 border-orange-200',
+        '视频冷却': 'bg-violet-50 text-violet-700 border-violet-200',
         '额度耗尽': 'bg-amber-50 text-amber-700 border-amber-200',
         '限流中': 'bg-orange-50 text-orange-700 border-orange-200',
         '失效': 'bg-destructive/10 text-destructive border-destructive/20',
@@ -1472,7 +1566,9 @@
         const limitReasonText = limitLabels[t.limit_reason] || '-';
         const cooldownText = t.cooldown_remaining ? formatDuration(t.cooldown_remaining) : '-';
         const cooldownTitle = t.cooldown_until ? formatDateTime(t.cooldown_until) : '';
-        const limitInfoHtml = `<div class="text-xs ${limitReasonText === '-' ? 'text-muted-foreground' : 'text-gray-700'}"><div>${limitReasonText}</div><div${cooldownTitle ? ` title="${cooldownTitle}"` : ''}>${cooldownText}</div></div>`;
+        const videoCdText = t.video_cooldown_remaining ? `🎬${formatDuration(t.video_cooldown_remaining)}` : '';
+        const videoCdTitle = t.video_cooldown_until ? `视频冷却至 ${formatDateTime(t.video_cooldown_until)}` : '';
+        const limitInfoHtml = `<div class="text-xs ${limitReasonText === '-' && !videoCdText ? 'text-muted-foreground' : 'text-gray-700'}"><div>${limitReasonText}</div><div${cooldownTitle ? ` title="${cooldownTitle}"` : ''}>${cooldownText}</div>${videoCdText ? `<div class="text-violet-600" title="${videoCdTitle}">${videoCdText}</div>` : ''}</div>`;
         const failureReason = t.last_failure_reason || '-';
         const failureTitle = failureReason.replace(/"/g, '&quot;');
         const failureDisplay = failureReason.length > 24 ? failureReason.substring(0, 24) + '...' : failureReason;
@@ -1833,6 +1929,173 @@
     const loadMoreCachePreview = () => loadCachePreview(false);
     const saveGlobalSettings = async () => { const gc = { admin_username: $('cfgAdminUser').value, log_level: $('cfgLogLevel').value, image_cache_max_size_mb: parseInt($('cfgImageCacheMaxSize').value) || 500, video_cache_max_size_mb: parseInt($('cfgVideoCacheMaxSize').value) || 1000, image_mode: $('cfgImageMode').value, base_url: $('cfgBaseUrl').value }; if ($('cfgAdminPass').value) gc.admin_password = $('cfgAdminPass').value; try { const r = await apiRequest('/api/settings'); if (!r) return; const d = await r.json(); if (!d.success) return showToast('加载配置失败', 'error'); const s = await apiRequest('/api/settings', { method: 'POST', body: JSON.stringify({ global_config: gc, grok_config: d.data.grok }) }); if (!s) return; const sd = await s.json(); sd.success ? (showToast('全局配置保存成功', 'success'), $('cfgAdminPass').value = '') : showToast('保存失败: ' + (sd.error || '未知错误'), 'error') } catch (e) { showToast('保存失败: ' + e.message, 'error') } };
     const saveGrokSettings = async () => { const retryCodesStr = $('cfgRetryStatusCodes').value.trim(); const retryCodes = retryCodesStr ? retryCodesStr.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [401, 429]; const kc = { api_key: $('cfgApiKey').value, x_statsig_id: $('cfgStatsigId').value, dynamic_statsig: $('cfgDynamicStatsig').checked, filtered_tags: $('cfgFilteredTags').value, show_thinking: $('cfgShowThinking').value === 'true', temporary: $('cfgTemporary').value === 'true', stream_chunk_timeout: parseInt($('cfgStreamChunkTimeout').value) || 120, stream_first_response_timeout: parseInt($('cfgStreamFirstResponseTimeout').value) || 30, stream_total_timeout: parseInt($('cfgStreamTotalTimeout').value) || 600, retry_status_codes: retryCodes }; try { const r = await apiRequest('/api/settings'); if (!r) return; const d = await r.json(); if (!d.success) return showToast('加载配置失败', 'error'); const s = await apiRequest('/api/settings', { method: 'POST', body: JSON.stringify({ global_config: d.data.global, grok_config: kc }) }); if (!s) return; const sd = await s.json(); sd.success ? showToast('Grok配置保存成功', 'success') : showToast('保存失败: ' + (sd.error || '未知错误'), 'error') } catch (e) { showToast('保存失败: ' + e.message, 'error') } };
+    // --- 中转管理 ---
+
+    let relayData = { enabled: false, servers: [] };
+
+    const loadRelaySettings = async () => {
+      try {
+        const r = await apiRequest('/api/relay');
+        if (!r) return;
+        const d = await r.json();
+        if (d.success) {
+          relayData = d.data;
+          $('relayEnabledToggle').checked = relayData.enabled;
+          renderRelayList();
+        }
+      } catch (e) { showToast('加载中转配置失败: ' + e.message, 'error') }
+    };
+
+    const renderRelayList = () => {
+      const container = $('relayServerList');
+      if (!relayData.servers.length) {
+        container.innerHTML = '<div class="text-center text-muted-foreground py-8 border border-dashed border-border rounded-lg">暂无中转服务器，点击上方"添加服务器"按钮添加</div>';
+        return;
+      }
+      const sorted = [...relayData.servers].sort((a, b) => a.priority - b.priority);
+      container.innerHTML = sorted.map(s => {
+        const statusDot = s.is_active ? 'bg-green-500' : 'bg-gray-400';
+        const statusText = s.is_active ? '启用' : '禁用';
+        const checkInfo = s.last_check_time
+          ? `<span class="text-xs ${s.last_check_ok ? 'text-green-600' : 'text-red-600'}">${s.last_check_ok ? '连通' : '异常'} (${new Date(s.last_check_time).toLocaleString('zh-CN')})</span>`
+          : '<span class="text-xs text-muted-foreground">未检测</span>';
+        return `<div class="rounded-lg border border-border bg-background p-4">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-3">
+              <span class="h-2.5 w-2.5 rounded-full ${statusDot}"></span>
+              <span class="font-semibold text-sm">${escHtml(s.name)}</span>
+              <span class="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">优先级: ${s.priority}</span>
+              <span class="text-xs text-muted-foreground">${statusText}</span>
+            </div>
+            <div class="flex gap-2">
+              <button onclick="testRelayServer('${s.id}')" class="inline-flex items-center justify-center rounded-md text-xs font-medium border border-input bg-background hover:bg-accent h-8 px-3 transition-colors">测试</button>
+              <button onclick="editRelayServer('${s.id}')" class="inline-flex items-center justify-center rounded-md text-xs font-medium border border-input bg-background hover:bg-accent h-8 px-3 transition-colors">编辑</button>
+              <button onclick="deleteRelayServer('${s.id}')" class="inline-flex items-center justify-center rounded-md text-xs font-medium border border-red-200 text-red-600 bg-background hover:bg-red-50 h-8 px-3 transition-colors">删除</button>
+            </div>
+          </div>
+          <div class="text-xs text-muted-foreground space-y-1">
+            <div><span class="font-medium">URL:</span> ${escHtml(s.url)}</div>
+            <div><span class="font-medium">Secret:</span> ${'*'.repeat(Math.min(s.secret.length, 16))}</div>
+            ${s.note ? `<div><span class="font-medium">备注:</span> ${escHtml(s.note)}</div>` : ''}
+            <div><span class="font-medium">最近检测:</span> ${checkInfo}</div>
+          </div>
+        </div>`;
+      }).join('');
+    };
+
+    const escHtml = (str) => {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    };
+
+    const toggleRelayEnabled = async () => {
+      const enabled = $('relayEnabledToggle').checked;
+      try {
+        const r = await apiRequest('/api/relay', { method: 'POST', body: JSON.stringify({ enabled }) });
+        if (!r) return;
+        const d = await r.json();
+        if (d.success) {
+          relayData.enabled = enabled;
+          showToast(enabled ? '中转已启用' : '中转已关闭', 'success');
+        } else {
+          $('relayEnabledToggle').checked = !enabled;
+          showToast('切换失败', 'error');
+        }
+      } catch (e) {
+        $('relayEnabledToggle').checked = !enabled;
+        showToast('切换失败: ' + e.message, 'error');
+      }
+    };
+
+    const showAddRelayModal = () => {
+      $('relayModalTitle').textContent = '添加中转服务器';
+      $('relayEditId').value = '';
+      $('relayName').value = '';
+      $('relayUrl').value = '';
+      $('relaySecret').value = '';
+      $('relayPriority').value = relayData.servers.length;
+      $('relayActive').value = 'true';
+      $('relayNote').value = '';
+      $('relayModal').classList.remove('hidden');
+    };
+
+    const editRelayServer = (id) => {
+      const s = relayData.servers.find(x => x.id === id);
+      if (!s) return;
+      $('relayModalTitle').textContent = '编辑中转服务器';
+      $('relayEditId').value = s.id;
+      $('relayName').value = s.name;
+      $('relayUrl').value = s.url;
+      $('relaySecret').value = s.secret;
+      $('relayPriority').value = s.priority;
+      $('relayActive').value = String(s.is_active);
+      $('relayNote').value = s.note || '';
+      $('relayModal').classList.remove('hidden');
+    };
+
+    const closeRelayModal = () => $('relayModal').classList.add('hidden');
+
+    const submitRelay = async () => {
+      const editId = $('relayEditId').value;
+      const data = {
+        name: $('relayName').value,
+        url: $('relayUrl').value,
+        secret: $('relaySecret').value,
+        priority: parseInt($('relayPriority').value) || 0,
+        is_active: $('relayActive').value === 'true',
+        note: $('relayNote').value,
+      };
+      if (!data.url) return showToast('URL 不能为空', 'error');
+      if (!data.secret) return showToast('Secret 不能为空', 'error');
+
+      try {
+        const endpoint = editId ? '/api/relay/update' : '/api/relay/add';
+        const body = editId ? { ...data, id: editId } : data;
+        const r = await apiRequest(endpoint, { method: 'POST', body: JSON.stringify(body) });
+        if (!r) return;
+        const d = await r.json();
+        if (d.success) {
+          closeRelayModal();
+          showToast(editId ? '服务器已更新' : '服务器已添加', 'success');
+          await loadRelaySettings();
+        } else {
+          showToast(d.error?.message || '操作失败', 'error');
+        }
+      } catch (e) { showToast('操作失败: ' + e.message, 'error') }
+    };
+
+    const deleteRelayServer = async (id) => {
+      if (!confirm('确认删除此中转服务器？')) return;
+      try {
+        const r = await apiRequest('/api/relay/delete', { method: 'POST', body: JSON.stringify({ id }) });
+        if (!r) return;
+        const d = await r.json();
+        if (d.success) {
+          showToast('已删除', 'success');
+          await loadRelaySettings();
+        } else { showToast(d.error?.message || '删除失败', 'error') }
+      } catch (e) { showToast('删除失败: ' + e.message, 'error') }
+    };
+
+    const testRelayServer = async (id) => {
+      showToast('正在测试连通性...', 'success');
+      try {
+        const r = await apiRequest('/api/relay/test', { method: 'POST', body: JSON.stringify({ id }) });
+        if (!r) return;
+        const d = await r.json();
+        if (d.success && d.data) {
+          const { ok, status, elapsed_ms, error } = d.data;
+          if (ok) {
+            showToast(`连通成功！HTTP ${status}, 耗时 ${elapsed_ms}ms`, 'success');
+          } else {
+            showToast(`连通失败: ${error || `HTTP ${status}`}, 耗时 ${elapsed_ms}ms`, 'error');
+          }
+          await loadRelaySettings();
+        } else { showToast('测试失败', 'error') }
+      } catch (e) { showToast('测试失败: ' + e.message, 'error') }
+    };
+
     window.addEventListener('DOMContentLoaded', () => { refreshTokens(); initCacheViewer(); setInterval(() => { loadStats(); updateRemaining() }, 30000); $('cfgDynamicStatsig').addEventListener('change', updateStatsigIdState) });
   </script>
 </body>

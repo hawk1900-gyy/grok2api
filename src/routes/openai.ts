@@ -2,14 +2,14 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "../env";
 import { requireApiAuth } from "../auth";
-import { getSettings, normalizeCfCookie } from "../settings";
+import { getSettings, normalizeCfCookie, getRelaySettings } from "../settings";
 import { isValidModel, MODEL_CONFIG } from "../grok/models";
-import { extractContent, buildConversationPayload, sendConversationRequest } from "../grok/conversation";
+import { extractContent, buildConversationPayload, sendConversationRequest, resolveImageReferences, type RelayOption } from "../grok/conversation";
 import { uploadImage } from "../grok/upload";
-import { createMediaPost, createPost } from "../grok/create";
+import { createMediaPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { addRequestLog } from "../repo/logs";
-import { applyCooldown, recordTokenFailure, recordTokenSuccess, selectBestToken, selectTokenBySuffix } from "../repo/tokens";
+import { applyCooldown, applyVideoCooldown, recordTokenFailure, recordTokenSuccess, selectBestToken, selectTokenBySuffix } from "../repo/tokens";
 import type { ApiAuthInfo } from "../auth";
 
 function openAiError(message: string, code: string): Record<string, unknown> {
@@ -128,7 +128,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
 
     const stream = Boolean(body.stream);
     const videoConfig = body.video_config;
-    const maxRetry = 3;
+    const cfg = MODEL_CONFIG[requestedModel]!;
+    const isVideoModel = Boolean(cfg.is_video_model);
+    const maxRetry = isVideoModel ? 6 : 3;
     let lastErr: string | null = null;
 
     const forceSuffix = c.req.header("X-Token-Suffix")?.trim() || "";
@@ -144,7 +146,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
       } else {
         const chosen = forceSuffix
           ? await selectTokenBySuffix(c.env.DB, forceSuffix)
-          : await selectBestToken(c.env.DB, requestedModel);
+          : await selectBestToken(c.env.DB, requestedModel, isVideoModel);
         if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
         jwt = chosen.token;
       }
@@ -155,8 +157,6 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
       const { content, images } = extractContent(body.messages as any);
-      const cfg = MODEL_CONFIG[requestedModel]!;
-      const isVideoModel = Boolean(cfg.is_video_model);
       const MAX_IMAGES = 7;
       const imgInputs = images.slice(0, MAX_IMAGES);
 
@@ -168,19 +168,16 @@ openAiRoutes.post("/chat/completions", async (c) => {
         let postId: string | undefined;
         if (isVideoModel) {
           if (imgIds.length > 1) {
-            // 多图: 创建视频容器 post（parentPostId 与图片 ID 独立）
+            const resolvedPrompt = resolveImageReferences(content, imgIds);
             const post = await createMediaPost(
-              { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },
+              { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: resolvedPrompt },
               cookie,
               settingsBundle.grok,
             );
             postId = post.postId || undefined;
-          } else if (imgUris.length === 1) {
-            // 单图: 从图片创建 post
-            const post = await createPost(imgUris[0]!, cookie, settingsBundle.grok);
-            postId = post.postId || undefined;
+          } else if (imgIds.length === 1) {
+            // 单图: 直接用 fileId 作为 parentPostId，无需额外 createPost
           } else {
-            // 无图: 创建视频 post
             const post = await createMediaPost(
               { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },
               cookie,
@@ -200,11 +197,27 @@ openAiRoutes.post("/chat/completions", async (c) => {
           videoConfig,
         });
 
+        let relay: RelayOption | undefined;
+        try {
+          const relaySettings = await getRelaySettings(c.env);
+          if (relaySettings.enabled) {
+            const active = relaySettings.servers
+              .filter((s) => s.is_active)
+              .sort((a, b) => a.priority - b.priority);
+            if (active.length > 0) {
+              relay = { url: active[0]!.url, secret: active[0]!.secret };
+            }
+          }
+        } catch (e) {
+          console.error(`[relay] 配置读取失败: ${e instanceof Error ? e.message : e}`);
+        }
+
         const upstream = await sendConversationRequest({
           payload,
           cookie,
           settings: settingsBundle.grok,
           ...(referer ? { referer } : {}),
+          relay,
         });
 
         if (!upstream.ok) {
@@ -212,7 +225,11 @@ openAiRoutes.post("/chat/completions", async (c) => {
           lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
           if (!isRawToken) {
             await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
-            await applyCooldown(c.env.DB, jwt, upstream.status);
+            if (isVideoModel && upstream.status === 429) {
+              await applyVideoCooldown(c.env.DB, jwt);
+            } else {
+              await applyCooldown(c.env.DB, jwt, upstream.status);
+            }
           }
           if (retryCodes.includes(upstream.status) && attempt < maxRetry - 1) continue;
           break;

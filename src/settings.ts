@@ -29,9 +29,32 @@ export interface GrokSettings {
   retry_status_codes?: number[];
 }
 
+export interface RelayServer {
+  id: string;
+  name: string;
+  url: string;
+  secret: string;
+  is_active: boolean;
+  priority: number;
+  last_check_time?: number;
+  last_check_ok?: boolean;
+  note?: string;
+}
+
+export interface RelaySettings {
+  enabled: boolean;
+  servers: RelayServer[];
+}
+
+export const DEFAULT_RELAY_SETTINGS: RelaySettings = {
+  enabled: false,
+  servers: [],
+};
+
 export interface SettingsBundle {
   global: Required<GlobalSettings>;
   grok: Required<GrokSettings>;
+  relay: RelaySettings;
 }
 
 export const DEFAULT_GLOBAL_SETTINGS: Required<GlobalSettings> = {
@@ -141,6 +164,15 @@ export function loadGrokSettings(raw?: string): Required<GrokSettings> {
   };
 }
 
+export function loadRelaySettings(raw?: string): RelaySettings {
+  if (!raw) return { ...DEFAULT_RELAY_SETTINGS, servers: [] };
+  const parsed = safeParseJson<Partial<RelaySettings>>(raw, {});
+  return {
+    enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : false,
+    servers: Array.isArray(parsed.servers) ? parsed.servers : [],
+  };
+}
+
 export async function getSettings(env: Env): Promise<SettingsBundle> {
   const globalRow = await dbFirst<{ value: string }>(
     env.DB,
@@ -152,11 +184,35 @@ export async function getSettings(env: Env): Promise<SettingsBundle> {
     "SELECT value FROM settings WHERE key = ?",
     ["grok"],
   );
+  const relayRow = await dbFirst<{ value: string }>(
+    env.DB,
+    "SELECT value FROM settings WHERE key = ?",
+    ["relay"],
+  );
 
   return {
     global: loadGlobalSettings(globalRow?.value),
     grok: loadGrokSettings(grokRow?.value),
+    relay: loadRelaySettings(relayRow?.value),
   };
+}
+
+export async function getRelaySettings(env: Env): Promise<RelaySettings> {
+  const row = await dbFirst<{ value: string }>(
+    env.DB,
+    "SELECT value FROM settings WHERE key = ?",
+    ["relay"],
+  );
+  return loadRelaySettings(row?.value);
+}
+
+export async function saveRelaySettings(env: Env, relay: RelaySettings): Promise<void> {
+  const now = nowMs();
+  await dbRun(
+    env.DB,
+    "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+    ["relay", JSON.stringify(relay), now],
+  );
 }
 
 export async function saveSettings(

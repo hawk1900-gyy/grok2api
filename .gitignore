@@ -11,6 +11,16 @@ yarn-error.log*
 logs/*
 data/*
 
+# Python
+__pycache__/
+*.pyc
+
+# Test files
+test_*.py
+test_*.mjs
+test_*.json
+video/
+
 # IDEs
 .idea/
 .cursorignore

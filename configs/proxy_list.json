@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Decodo-JP-1",
+    "proxy": "http://spiak86w7e:hb3dX_HJvQ5de7eg1p@jp.decodo.com:30001",
+    "priority": 1,
+    "enabled": true,
+    "note": "Decodo 日本住宅, 粘性会话端口1"
+  },
+  {
+    "name": "Decodo-JP-2",
+    "proxy": "http://spiak86w7e:hb3dX_HJvQ5de7eg1p@jp.decodo.com:30002",
+    "priority": 2,
+    "enabled": true,
+    "note": "Decodo 日本住宅, 粘性会话端口2"
+  },
+  {
+    "name": "Decodo-JP-3",
+    "proxy": "http://spiak86w7e:hb3dX_HJvQ5de7eg1p@jp.decodo.com:30003",
+    "priority": 3,
+    "enabled": true,
+    "note": "Decodo 日本住宅, 粘性会话端口3"
+  },
+  {
+    "name": "Decodo-Gate",
+    "proxy": "http://spiak86w7e:hb3dX_HJvQ5de7eg1p@gate.decodo.com:10001",
+    "priority": 10,
+    "enabled": true,
+    "note": "Decodo 随机国家住宅, 兜底备用"
+  }
+]

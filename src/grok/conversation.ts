@@ -87,8 +87,6 @@ export function buildConversationPayload(args: {
   const { grokModel, mode, isVideoModel } = toGrokModel(requestModel);
 
   if (cfg?.is_video_model) {
-    if (!postId) throw new Error("视频模型缺少 postId（需要先创建 media post）");
-
     const aspectRatio = (videoConfig?.aspect_ratio ?? "").trim() || "2:3";
     const videoLengthRaw = Number(videoConfig?.video_length ?? 6);
     const videoLength = Number.isFinite(videoLengthRaw) ? Math.max(1, Math.floor(videoLengthRaw)) : 6;
@@ -98,7 +96,6 @@ export function buildConversationPayload(args: {
 
     let modeFlag = "--mode=custom";
     if (preset === "fun") modeFlag = "--mode=extremely-crazy";
-    else if (preset === "normal") modeFlag = "--mode=normal";
     else if (preset === "spicy") modeFlag = "--mode=extremely-spicy-or-crazy";
 
     const assetUrls = imgUris.map((uri) => `https://assets.grok.com/${uri}`);
@@ -108,26 +105,28 @@ export function buildConversationPayload(args: {
     let message: string;
     const payload: Record<string, unknown> = {
       temporary: true,
-      modelName: "grok-3",
+      modelName: grokModel,
       toolOverrides: { videoGen: true },
       enableSideBySide: true,
     };
 
     const videoGenModelConfig: Record<string, unknown> = {
-      parentPostId: postId,
+      parentPostId: postId || (imgIds.length === 1 ? imgIds[0] : ""),
       aspectRatio,
       videoLength,
       resolutionName,
     };
 
     if (isMultiImage) {
+      if (!postId) throw new Error("多图视频模型缺少 postId（需要先创建 media post）");
       message = `${resolveImageReferences(textContent, imgIds)} ${modeFlag}`.trim();
       videoGenModelConfig.isReferenceToVideo = true;
       videoGenModelConfig.imageReferences = assetUrls;
     } else if (imgIds.length === 1) {
-      message = `${assetUrls[0]}  ${textContent} ${modeFlag}`.trim();
+      message = `${assetUrls[0]}  @${imgIds[0]} ${textContent} ${modeFlag}`.trim();
       payload.fileAttachments = [imgIds[0]];
     } else {
+      if (!postId) throw new Error("无图视频模型缺少 postId（需要先创建 media post）");
       message = `${textContent} ${modeFlag}`.trim();
     }
 
@@ -172,17 +171,57 @@ export function buildConversationPayload(args: {
   };
 }
 
+export interface RelayOption {
+  url: string;
+  secret: string;
+}
+
 export async function sendConversationRequest(args: {
   payload: Record<string, unknown>;
   cookie: string;
   settings: GrokSettings;
   referer?: string;
+  relay?: RelayOption;
 }): Promise<Response> {
-  const { payload, cookie, settings, referer } = args;
+  const { payload, cookie, settings, referer, relay } = args;
   const headers = getDynamicHeaders(settings, "/rest/app-chat/conversations/new");
   headers.Cookie = cookie;
   if (referer) headers.Referer = referer;
   const body = JSON.stringify(payload);
+
+  if (relay) {
+    try {
+      const relayBody = JSON.stringify({
+        url: CONVERSATION_API,
+        method: "POST",
+        headers,
+        body,
+      });
+      const relayResp = await fetch(`${relay.url}/relay`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Relay-Secret": relay.secret,
+        },
+        body: relayBody,
+      });
+      if (relayResp.status === 502 || relayResp.status === 503) {
+        console.error(`[relay] 中转服务内部错误 HTTP ${relayResp.status}`);
+      } else if (relayResp.status === 403) {
+        const txt = await relayResp.text().catch(() => "");
+        if (txt.includes("invalid secret")) {
+          console.error("[relay] 中转 Secret 验证失败，请检查管理后台中转配置");
+        }
+      }
+      return relayResp;
+    } catch (e) {
+      console.error(`[relay] 中转服务不可达: ${e instanceof Error ? e.message : e}`);
+      return new Response(JSON.stringify({ error: { code: 502, message: `Relay unreachable: ${e instanceof Error ? e.message : e}` } }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
 
   return fetch(CONVERSATION_API, { method: "POST", headers, body });
 }
