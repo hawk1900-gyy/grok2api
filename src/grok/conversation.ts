@@ -176,6 +176,51 @@ export interface RelayOption {
   secret: string;
 }
 
+/**
+ * 通用中转 fetch：当 relay 配置存在时，请求经由中转服务转发到目标 URL；
+ * 否则直连。所有发往 grok.com 的请求都应使用此函数。
+ */
+export async function relayFetch(
+  targetUrl: string,
+  init: { method: string; headers: Record<string, string>; body: string },
+  relay?: RelayOption | undefined,
+): Promise<Response> {
+  if (relay) {
+    try {
+      const relayBody = JSON.stringify({
+        url: targetUrl,
+        method: init.method,
+        headers: init.headers,
+        body: init.body,
+      });
+      const resp = await fetch(`${relay.url}/relay`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Relay-Secret": relay.secret,
+        },
+        body: relayBody,
+      });
+      if (resp.status === 502 || resp.status === 503) {
+        console.error(`[relay] 中转服务内部错误 HTTP ${resp.status}`);
+      } else if (resp.status === 403) {
+        const txt = await resp.text().catch(() => "");
+        if (txt.includes("invalid secret")) {
+          console.error("[relay] 中转 Secret 验证失败，请检查管理后台中转配置");
+        }
+      }
+      return resp;
+    } catch (e) {
+      console.error(`[relay] 中转服务不可达: ${e instanceof Error ? e.message : e}`);
+      return new Response(JSON.stringify({ error: { code: 502, message: `Relay unreachable: ${e instanceof Error ? e.message : e}` } }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+  return fetch(targetUrl, { method: init.method, headers: init.headers, body: init.body });
+}
+
 export async function sendConversationRequest(args: {
   payload: Record<string, unknown>;
   cookie: string;
@@ -187,41 +232,5 @@ export async function sendConversationRequest(args: {
   const headers = getDynamicHeaders(settings, "/rest/app-chat/conversations/new");
   headers.Cookie = cookie;
   if (referer) headers.Referer = referer;
-  const body = JSON.stringify(payload);
-
-  if (relay) {
-    try {
-      const relayBody = JSON.stringify({
-        url: CONVERSATION_API,
-        method: "POST",
-        headers,
-        body,
-      });
-      const relayResp = await fetch(`${relay.url}/relay`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Relay-Secret": relay.secret,
-        },
-        body: relayBody,
-      });
-      if (relayResp.status === 502 || relayResp.status === 503) {
-        console.error(`[relay] 中转服务内部错误 HTTP ${relayResp.status}`);
-      } else if (relayResp.status === 403) {
-        const txt = await relayResp.text().catch(() => "");
-        if (txt.includes("invalid secret")) {
-          console.error("[relay] 中转 Secret 验证失败，请检查管理后台中转配置");
-        }
-      }
-      return relayResp;
-    } catch (e) {
-      console.error(`[relay] 中转服务不可达: ${e instanceof Error ? e.message : e}`);
-      return new Response(JSON.stringify({ error: { code: 502, message: `Relay unreachable: ${e instanceof Error ? e.message : e}` } }), {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-  }
-
-  return fetch(CONVERSATION_API, { method: "POST", headers, body });
+  return relayFetch(CONVERSATION_API, { method: "POST", headers, body: JSON.stringify(payload) }, relay);
 }

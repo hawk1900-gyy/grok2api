@@ -1,5 +1,6 @@
 import type { GrokSettings } from "../settings";
 import { getDynamicHeaders } from "./headers";
+import { relayFetch, type RelayOption } from "./conversation";
 
 const ENDPOINT = "https://grok.com/rest/media/post/create";
 
@@ -9,6 +10,7 @@ export async function createMediaPost(
   args: { mediaType: MediaPostType; prompt?: string; mediaUrl?: string },
   cookie: string,
   settings: GrokSettings,
+  relay?: RelayOption | undefined,
 ): Promise<{ postId: string }> {
   const headers = getDynamicHeaders(settings, "/rest/media/post/create");
   headers.Cookie = cookie;
@@ -24,7 +26,7 @@ export async function createMediaPost(
   }
 
   const body = JSON.stringify(bodyObj);
-  const resp = await fetch(ENDPOINT, { method: "POST", headers, body });
+  const resp = await relayFetch(ENDPOINT, { method: "POST", headers, body }, relay);
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`创建会话失败: ${resp.status} ${text.slice(0, 200)}`);

@@ -2086,10 +2086,11 @@
         const d = await r.json();
         if (d.success && d.data) {
           const { ok, status, elapsed_ms, error } = d.data;
+          const bodyInfo = d.data.body ? ` | ${d.data.body.slice(0, 150)}` : '';
           if (ok) {
-            showToast(`连通成功！HTTP ${status}, 耗时 ${elapsed_ms}ms`, 'success');
+            showToast(`连通成功！HTTP ${status}, 耗时 ${elapsed_ms}ms${bodyInfo}`, 'success');
           } else {
-            showToast(`连通失败: ${error || `HTTP ${status}`}, 耗时 ${elapsed_ms}ms`, 'error');
+            showToast(`连通失败: ${error || `HTTP ${status}`}, 耗时 ${elapsed_ms}ms${bodyInfo}`, 'error');
           }
           await loadRelaySettings();
         } else { showToast('测试失败', 'error') }

@@ -160,8 +160,23 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const MAX_IMAGES = 7;
       const imgInputs = images.slice(0, MAX_IMAGES);
 
+      let relay: RelayOption | undefined;
       try {
-        const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok));
+        const relaySettings = await getRelaySettings(c.env);
+        if (relaySettings.enabled) {
+          const active = relaySettings.servers
+            .filter((s) => s.is_active)
+            .sort((a, b) => a.priority - b.priority);
+          if (active.length > 0) {
+            relay = { url: active[0]!.url, secret: active[0]!.secret };
+          }
+        }
+      } catch (e) {
+        console.error(`[relay] 配置读取失败: ${e instanceof Error ? e.message : e}`);
+      }
+
+      try {
+        const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok, relay));
         const imgIds = uploads.map((u) => u.fileId).filter(Boolean);
         const imgUris = uploads.map((u) => u.fileUri).filter(Boolean);
 
@@ -173,6 +188,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
               { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: resolvedPrompt },
               cookie,
               settingsBundle.grok,
+              relay,
             );
             postId = post.postId || undefined;
           } else if (imgIds.length === 1) {
@@ -182,6 +198,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
               { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },
               cookie,
               settingsBundle.grok,
+              relay,
             );
             postId = post.postId || undefined;
           }
@@ -196,21 +213,6 @@ openAiRoutes.post("/chat/completions", async (c) => {
           settings: settingsBundle.grok,
           videoConfig,
         });
-
-        let relay: RelayOption | undefined;
-        try {
-          const relaySettings = await getRelaySettings(c.env);
-          if (relaySettings.enabled) {
-            const active = relaySettings.servers
-              .filter((s) => s.is_active)
-              .sort((a, b) => a.priority - b.priority);
-            if (active.length > 0) {
-              relay = { url: active[0]!.url, secret: active[0]!.secret };
-            }
-          }
-        } catch (e) {
-          console.error(`[relay] 配置读取失败: ${e instanceof Error ? e.message : e}`);
-        }
 
         const upstream = await sendConversationRequest({
           payload,
