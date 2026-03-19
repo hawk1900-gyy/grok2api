@@ -9,13 +9,13 @@ assets = { directory = "./app/template", binding = "ASSETS" }
 binding = "DB"
 database_name = "grok2api"
 # Filled by CI / your first deployment bootstrap.
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "9fce57a6-63ac-4159-842c-da8dfdcfde9a"
 migrations_dir = "migrations"
 
 [[kv_namespaces]]
 binding = "KV_CACHE"
 # Filled by CI / your first deployment bootstrap.
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "ac6f10c5c3924db2b135427561958e02"
 
 [vars]
 # Daily reset at local midnight (default: Asia/Shanghai, UTC+8).
