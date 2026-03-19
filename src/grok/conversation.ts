@@ -180,8 +180,8 @@ export async function sendConversationRequest(args: {
   payload: Record<string, unknown>;
   cookie: string;
   settings: GrokSettings;
-  referer?: string;
-  relay?: RelayOption;
+  referer?: string | undefined;
+  relay?: RelayOption | undefined;
 }): Promise<Response> {
   const { payload, cookie, settings, referer, relay } = args;
   const headers = getDynamicHeaders(settings, "/rest/app-chat/conversations/new");
