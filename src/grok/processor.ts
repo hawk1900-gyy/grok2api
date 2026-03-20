@@ -91,6 +91,12 @@ async function warmupCache(url: string, cookie: string): Promise<void> {
   }
 }
 
+function toFullAssetUrl(raw: string): string {
+  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  const path = raw.startsWith("/") ? raw : `/${raw}`;
+  return `https://assets.grok.com${path}`;
+}
+
 function encodeAssetPath(raw: string): string {
   try {
     const u = new URL(raw);
@@ -281,9 +287,9 @@ export function createOpenAiStreamFromGrokNdjson(
               }
 
               if (videoUrl) {
-                const src = passthrough ? videoUrl : toImgProxyUrl(global, origin, encodeAssetPath(videoUrl));
+                const src = passthrough ? toFullAssetUrl(videoUrl) : toImgProxyUrl(global, origin, encodeAssetPath(videoUrl));
                 const posterSrc = thumbnailUrl
-                  ? (passthrough ? thumbnailUrl : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
+                  ? (passthrough ? toFullAssetUrl(thumbnailUrl) : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
                   : "";
                 const html = buildVideoHtml({
                   videoUrl: src,
@@ -306,7 +312,7 @@ export function createOpenAiStreamFromGrokNdjson(
                 if (urls.length) {
                   const linesOut: string[] = [];
                   for (const u of urls) {
-                    const imgUrl = passthrough ? u : toImgProxyUrl(global, origin, encodeAssetPath(u));
+                    const imgUrl = passthrough ? toFullAssetUrl(u) : toImgProxyUrl(global, origin, encodeAssetPath(u));
                     linesOut.push(imgUrl);
                     if (!passthrough) warmupCache(imgUrl, opts.cookie).catch(() => {});
                   }
@@ -427,11 +433,11 @@ export async function parseOpenAiFromGrokNdjson(
 
     const videoResp = grok.streamingVideoGenerationResponse;
     if (videoResp?.videoUrl && typeof videoResp.videoUrl === "string") {
-      const src = passthrough ? videoResp.videoUrl : toImgProxyUrl(global, origin, encodeAssetPath(videoResp.videoUrl));
+      const src = passthrough ? toFullAssetUrl(videoResp.videoUrl) : toImgProxyUrl(global, origin, encodeAssetPath(videoResp.videoUrl));
       const thumbnailUrl =
         typeof videoResp.thumbnailImageUrl === "string" ? videoResp.thumbnailImageUrl : "";
       const posterSrc = thumbnailUrl
-        ? (passthrough ? thumbnailUrl : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
+        ? (passthrough ? toFullAssetUrl(thumbnailUrl) : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
         : "";
       content = buildVideoHtml({
         videoUrl: src,
@@ -453,7 +459,7 @@ export async function parseOpenAiFromGrokNdjson(
     const urls = normalizeGeneratedAssetUrls(modelResp.generatedImageUrls);
     if (urls.length) {
       for (const u of urls) {
-        const imgUrl = passthrough ? u : toImgProxyUrl(global, origin, encodeAssetPath(u));
+        const imgUrl = passthrough ? toFullAssetUrl(u) : toImgProxyUrl(global, origin, encodeAssetPath(u));
         content += `\n${imgUrl}`;
         if (!passthrough) warmupCache(imgUrl, opts.cookie).catch(() => {});
       }
