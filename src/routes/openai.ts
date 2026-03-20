@@ -245,6 +245,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
             settings: settingsBundle.grok,
             global: settingsBundle.global,
             origin,
+            isRawToken,
             onFinish: async ({ status, duration }) => {
               await addRequestLog(c.env.DB, {
                 ip,
@@ -276,6 +277,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           global: settingsBundle.global,
           origin,
           requestedModel,
+          isRawToken,
         });
 
         const duration = (Date.now() - start) / 1000;

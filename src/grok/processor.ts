@@ -127,10 +127,12 @@ export function createOpenAiStreamFromGrokNdjson(
     settings: GrokSettings;
     global: GlobalSettings;
     origin: string;
+    isRawToken?: boolean | undefined;
     onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
   },
 ): ReadableStream<Uint8Array> {
   const { settings, global, origin } = opts;
+  const passthrough = opts.isRawToken === true;
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
@@ -279,10 +281,9 @@ export function createOpenAiStreamFromGrokNdjson(
               }
 
               if (videoUrl) {
-                const videoPath = encodeAssetPath(videoUrl);
-                const src = toImgProxyUrl(global, origin, videoPath);
+                const src = passthrough ? videoUrl : toImgProxyUrl(global, origin, encodeAssetPath(videoUrl));
                 const posterSrc = thumbnailUrl
-                  ? toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl))
+                  ? (passthrough ? thumbnailUrl : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
                   : "";
                 const html = buildVideoHtml({
                   videoUrl: src,
@@ -290,8 +291,7 @@ export function createOpenAiStreamFromGrokNdjson(
                   posterPreview: settings.video_poster_preview === true,
                 });
                 controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, html)));
-                // 预热缓存：主动访问视频URL触发缓存写入
-                warmupCache(src, opts.cookie).catch(() => {});
+                if (!passthrough) warmupCache(src, opts.cookie).catch(() => {});
               }
               continue;
             }
@@ -306,11 +306,9 @@ export function createOpenAiStreamFromGrokNdjson(
                 if (urls.length) {
                   const linesOut: string[] = [];
                   for (const u of urls) {
-                    const imgPath = encodeAssetPath(u);
-                    const imgUrl = toImgProxyUrl(global, origin, imgPath);
+                    const imgUrl = passthrough ? u : toImgProxyUrl(global, origin, encodeAssetPath(u));
                     linesOut.push(imgUrl);
-                    // 预热缓存：主动访问图片URL触发缓存写入
-                    warmupCache(imgUrl, opts.cookie).catch(() => {});
+                    if (!passthrough) warmupCache(imgUrl, opts.cookie).catch(() => {});
                   }
                   controller.enqueue(
                     encoder.encode(makeChunk(id, created, currentModel, linesOut.join("\n"), "stop")),
@@ -404,9 +402,10 @@ export function createOpenAiStreamFromGrokNdjson(
 
 export async function parseOpenAiFromGrokNdjson(
   grokResp: Response,
-  opts: { cookie: string; settings: GrokSettings; global: GlobalSettings; origin: string; requestedModel: string },
+  opts: { cookie: string; settings: GrokSettings; global: GlobalSettings; origin: string; requestedModel: string; isRawToken?: boolean | undefined },
 ): Promise<Record<string, unknown>> {
   const { global, origin, requestedModel } = opts;
+  const passthrough = opts.isRawToken === true;
   const text = await grokResp.text();
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
 
@@ -428,12 +427,11 @@ export async function parseOpenAiFromGrokNdjson(
 
     const videoResp = grok.streamingVideoGenerationResponse;
     if (videoResp?.videoUrl && typeof videoResp.videoUrl === "string") {
-      const videoPath = encodeAssetPath(videoResp.videoUrl);
-      const src = toImgProxyUrl(global, origin, videoPath);
+      const src = passthrough ? videoResp.videoUrl : toImgProxyUrl(global, origin, encodeAssetPath(videoResp.videoUrl));
       const thumbnailUrl =
         typeof videoResp.thumbnailImageUrl === "string" ? videoResp.thumbnailImageUrl : "";
       const posterSrc = thumbnailUrl
-        ? toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl))
+        ? (passthrough ? thumbnailUrl : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
         : "";
       content = buildVideoHtml({
         videoUrl: src,
@@ -441,8 +439,7 @@ export async function parseOpenAiFromGrokNdjson(
         posterPreview: opts.settings.video_poster_preview === true,
       });
       model = requestedModel;
-      // 预热缓存：主动访问视频URL触发缓存写入
-      warmupCache(src, opts.cookie).catch(() => {});
+      if (!passthrough) warmupCache(src, opts.cookie).catch(() => {});
       break;
     }
 
@@ -456,11 +453,9 @@ export async function parseOpenAiFromGrokNdjson(
     const urls = normalizeGeneratedAssetUrls(modelResp.generatedImageUrls);
     if (urls.length) {
       for (const u of urls) {
-        const imgPath = encodeAssetPath(u);
-        const imgUrl = toImgProxyUrl(global, origin, imgPath);
+        const imgUrl = passthrough ? u : toImgProxyUrl(global, origin, encodeAssetPath(u));
         content += `\n${imgUrl}`;
-        // 预热缓存：主动访问图片URL触发缓存写入
-        warmupCache(imgUrl, opts.cookie).catch(() => {});
+        if (!passthrough) warmupCache(imgUrl, opts.cookie).catch(() => {});
       }
       break;
     }

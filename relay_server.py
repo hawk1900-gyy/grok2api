@@ -46,20 +46,34 @@ relay_bp = Blueprint("relay", __name__)
 
 # ── 内部函数 ──
 
-def _load_proxy_list():
-    """从 proxy_list.json 加载已启用的代理列表，按 priority 排序"""
+def _load_proxy_config():
+    """
+    从 proxy_list.json 加载代理配置。
+    返回 (proxy_routes, proxy_list):
+      proxy_routes: URL 路径关键词列表，命中则走住宅代理
+      proxy_list:   已启用的代理列表，按 priority 排序
+    """
     path = _config["proxy_config_path"]
     if not os.path.exists(path):
-        return []
+        return [], []
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        proxies = [p for p in raw if p.get("enabled") and p.get("proxy", "").strip()]
+
+        if isinstance(raw, dict):
+            routes = raw.get("proxy_routes", ["/conversations/new"])
+            proxies_raw = raw.get("proxies", [])
+        else:
+            # 兼容旧格式（纯数组）
+            routes = ["/conversations/new"]
+            proxies_raw = raw
+
+        proxies = [p for p in proxies_raw if isinstance(p, dict) and p.get("enabled") and p.get("proxy", "").strip()]
         proxies.sort(key=lambda p: p.get("priority", 999))
-        return proxies
+        return routes, proxies
     except Exception as e:
         debug_print(f"Error:relay_server: 代理配置文件加载失败 ({path}): {e}")
-        return []
+        return [], []
 
 
 def _do_request(method, url, headers, body, proxy_url=None):
@@ -121,7 +135,7 @@ def relay_ping():
     """健康检查，CF Worker 用来测试连通性"""
     if not _check_secret():
         return jsonify({"ok": False, "error": "invalid secret"}), 403
-    proxy_list = _load_proxy_list()
+    _, proxy_list = _load_proxy_config()
     proxy_names = [p.get("name", "unnamed") for p in proxy_list]
     return jsonify({
         "ok": True,
@@ -167,14 +181,14 @@ def relay_forward():
 
     debug_print(f"relay_server: 转发 {method} {target_url} (body {len(body)} bytes)")
 
-    # 只有 conversations/new 需要住宅代理（anti-bot），其他端点 VPS 直连即可
-    need_proxy = "/conversations/new" in target_url
+    proxy_routes, proxy_list = _load_proxy_config()
+    need_proxy = any(route in target_url for route in proxy_routes)
 
     upstream = None
     used_proxy = None
 
     if need_proxy:
-        proxy_list = _load_proxy_list()
+        debug_print(f"relay_server: 命中代理路由规则，尝试住宅代理 (规则: {proxy_routes})")
         for px in proxy_list:
             px_url = px["proxy"].strip()
             px_name = px.get("name", px_url)

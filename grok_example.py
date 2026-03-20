@@ -152,11 +152,15 @@ def _offer_download(content: str, media_type: str, subdir: str = "video"):
 
 
 def download_media(url: str, save_path: str, timeout: int = 120) -> bool:
-    """下载图片/视频到本地，无需 API Key（/images/ 接口公开）"""
+    """下载图片/视频到本地。assets.grok.com 需要 SSO Cookie 认证"""
     import urllib.request
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Grok2API-Python/1.0"}, method="GET")
+        headers = {"User-Agent": "Grok2API-Python/1.0"}
+        if "assets.grok.com" in url and USE_RAW_TOKEN and X_RAW_TOKEN:
+            token = X_RAW_TOKEN.strip()
+            headers["Cookie"] = f"sso={token};sso-rw={token}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
