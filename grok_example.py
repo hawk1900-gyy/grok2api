@@ -152,25 +152,43 @@ def _offer_download(content: str, media_type: str, subdir: str = "video"):
 
 
 def download_media(url: str, save_path: str, timeout: int = 120) -> bool:
-    """下载图片/视频到本地。assets.grok.com 需要 SSO Cookie 认证"""
+    """下载图片/视频到本地。assets.grok.com 需要 SSO Cookie 认证。
+    视频可能需要等待 CDN 就绪，404 时自动重试。"""
+    import time
+    import urllib.error
     import urllib.request
 
-    try:
-        headers = {"User-Agent": "Grok2API-Python/1.0"}
-        if "assets.grok.com" in url and USE_RAW_TOKEN and X_RAW_TOKEN:
-            token = X_RAW_TOKEN.strip()
-            headers["Cookie"] = f"sso={token};sso-rw={token}"
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        with open(save_path, "wb") as f:
-            f.write(data)
-        print(f"[已保存] {save_path} ({len(data) / 1024:.1f} KB)")
-        return True
-    except Exception as e:
-        print(f"[下载失败] {e}")
-        return False
+    headers = {"User-Agent": "Grok2API-Python/1.0"}
+    if "assets.grok.com" in url and USE_RAW_TOKEN and X_RAW_TOKEN:
+        token = X_RAW_TOKEN.strip()
+        headers["Cookie"] = f"sso={token};sso-rw={token}"
+
+    is_video = ".mp4" in url or "generated_video" in url
+    retry_delays = [10, 15, 20, 30] if is_video else []
+    attempts = [0] + retry_delays
+
+    for i, delay in enumerate(attempts):
+        if delay > 0:
+            print(f"[等待CDN] 视频可能还在处理中，{delay}秒后第{i}次重试...")
+            time.sleep(delay)
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(data)
+            print(f"[已保存] {save_path} ({len(data) / 1024:.1f} KB)")
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and i < len(attempts) - 1:
+                continue
+            print(f"[下载失败] HTTP Error {e.code}: {e.reason}")
+            return False
+        except Exception as e:
+            print(f"[下载失败] {e}")
+            return False
+    return False
 
 
 def _image_to_data_url(path: str) -> str:

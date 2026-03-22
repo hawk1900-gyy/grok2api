@@ -192,7 +192,14 @@ openAiRoutes.post("/chat/completions", async (c) => {
             );
             postId = post.postId || undefined;
           } else if (imgIds.length === 1) {
-            // 单图: 直接用 fileId 作为 parentPostId，无需额外 createPost
+            // 单图: grok.com 也会调 create（MEDIA_POST_TYPE_IMAGE），用于注册媒体存储
+            const imgAssetUrl = `https://assets.grok.com/${imgUris[0]}`;
+            await createMediaPost(
+              { mediaType: "MEDIA_POST_TYPE_IMAGE", mediaUrl: imgAssetUrl },
+              cookie,
+              settingsBundle.grok,
+              relay,
+            );
           } else {
             const post = await createMediaPost(
               { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },

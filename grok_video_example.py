@@ -133,7 +133,8 @@ def generate_video(
 
 def download_video(url: str, raw_token: str, save_path: str, timeout: int = 120) -> str:
     """
-    下载视频文件，自动携带 SSO Cookie 认证
+    下载视频文件，自动携带 SSO Cookie 认证。
+    视频可能需要等待 CDN 就绪，404 时自动重试。
 
     Args:
         url:        视频地址（assets.grok.com 或其他）
@@ -147,22 +148,34 @@ def download_video(url: str, raw_token: str, save_path: str, timeout: int = 120)
     Raises:
         RuntimeError: 下载失败
     """
+    import time
+
     raw_token = raw_token.strip()
     headers = {"User-Agent": "Grok2API-VideoExample/1.0"}
     if "assets.grok.com" in url:
         headers["Cookie"] = f"sso={raw_token};sso-rw={raw_token}"
 
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"下载失败 HTTP {e.code}: {e.reason}") from e
+    retry_delays = [10, 15, 20, 30]
+    attempts = [0] + retry_delays
 
-    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-    with open(save_path, "wb") as f:
-        f.write(data)
-    return save_path
+    for i, delay in enumerate(attempts):
+        if delay > 0:
+            print(f"  [等待CDN] 视频可能还在处理中，{delay}秒后第{i}次重试...")
+            time.sleep(delay)
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(data)
+            return save_path
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and i < len(attempts) - 1:
+                continue
+            raise RuntimeError(f"下载失败 HTTP {e.code}: {e.reason}") from e
+
+    raise RuntimeError("下载失败：重试次数用尽，视频仍不可用")
 
 
 # ── 内部工具 ─────────────────────────────────────────────────

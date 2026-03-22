@@ -114,6 +114,7 @@ export function buildConversationPayload(args: {
       parentPostId: postId || (imgIds.length === 1 ? imgIds[0] : ""),
       aspectRatio,
       videoLength,
+      isVideoEdit: false,
       resolutionName,
     };
 
@@ -133,6 +134,7 @@ export function buildConversationPayload(args: {
     payload.message = message;
     payload.responseMetadata = {
       experiments: [],
+      coif: [136, 0],
       modelConfigOverride: {
         modelMap: { videoGenModelConfig },
       },

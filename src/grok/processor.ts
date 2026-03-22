@@ -126,6 +126,25 @@ function normalizeGeneratedAssetUrls(input: unknown): string[] {
   return out;
 }
 
+/**
+ * 从 userResponse.message 中提取 userId。
+ * 格式: "https://assets.grok.com/users/{userId}/..."
+ */
+function extractUserId(grok: Record<string, unknown>): string {
+  const msg = (grok as any).userResponse?.message;
+  if (typeof msg !== "string") return "";
+  const m = msg.match(/assets\.grok\.com\/users\/([0-9a-f-]+)/i);
+  return m && m[1] ? m[1] : "";
+}
+
+/**
+ * Grok 改版后 streamingVideoGenerationResponse 不再返回 videoUrl，
+ * 需要从 videoPostId + userId 构造视频路径。
+ */
+function buildVideoPathFromPostId(userId: string, videoPostId: string): string {
+  return `users/${userId}/generated/${videoPostId}/generated_video.mp4?cache=1`;
+}
+
 export function createOpenAiStreamFromGrokNdjson(
   grokResp: Response,
   opts: {
@@ -177,12 +196,33 @@ export function createOpenAiStreamFromGrokNdjson(
       let thinkingFinished = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
+      let videoEmitted = false;
+
+      // 用于构造视频 URL（Grok 新版不再返回 videoUrl）
+      let trackedUserId = "";
+      let trackedVideoPostId = "";
 
       let buffer = "";
 
       const flushStop = () => {
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
+      };
+
+      // 当视频帧结束但未通过 videoUrl 发送时，尝试用 videoPostId 构造并发送
+      const emitConstructedVideo = () => {
+        if (videoEmitted || !trackedVideoPostId || !trackedUserId) return;
+        videoEmitted = true;
+
+        if (videoProgressStarted && showThinking) {
+          controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, `视频已生成100%</think>\n`)));
+        }
+
+        const videoPath = buildVideoPathFromPostId(trackedUserId, trackedVideoPostId);
+        const src = passthrough ? toFullAssetUrl(videoPath) : toImgProxyUrl(global, origin, encodeAssetPath(videoPath));
+        const html = buildVideoHtml({ videoUrl: src, posterPreview: settings.video_poster_preview === true });
+        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, html)));
+        if (!passthrough) warmupCache(src, opts.cookie).catch(() => {});
       };
 
       try {
@@ -259,6 +299,12 @@ export function createOpenAiStreamFromGrokNdjson(
             const grok = (data as any).result?.response;
             if (!grok) continue;
 
+            // 提取 userId（从 userResponse 帧）
+            if (!trackedUserId) {
+              const uid = extractUserId(grok);
+              if (uid) trackedUserId = uid;
+            }
+
             const userRespModel = grok.userResponse?.model;
             if (typeof userRespModel === "string" && userRespModel.trim()) currentModel = userRespModel.trim();
 
@@ -269,6 +315,11 @@ export function createOpenAiStreamFromGrokNdjson(
               const videoUrl = typeof videoResp.videoUrl === "string" ? videoResp.videoUrl : "";
               const thumbnailUrl =
                 typeof videoResp.thumbnailImageUrl === "string" ? videoResp.thumbnailImageUrl : "";
+
+              // 跟踪 videoPostId 用于构造 URL
+              if (typeof videoResp.videoPostId === "string" && videoResp.videoPostId) {
+                trackedVideoPostId = videoResp.videoPostId;
+              }
 
               if (progress > lastVideoProgress) {
                 lastVideoProgress = progress;
@@ -286,7 +337,9 @@ export function createOpenAiStreamFromGrokNdjson(
                 }
               }
 
+              // 旧版 Grok 直接返回 videoUrl
               if (videoUrl) {
+                videoEmitted = true;
                 const src = passthrough ? toFullAssetUrl(videoUrl) : toImgProxyUrl(global, origin, encodeAssetPath(videoUrl));
                 const posterSrc = thumbnailUrl
                   ? (passthrough ? toFullAssetUrl(thumbnailUrl) : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
@@ -302,10 +355,15 @@ export function createOpenAiStreamFromGrokNdjson(
               continue;
             }
 
+            // 当非视频帧到来（如 token/modelResponse），且之前有视频进度但未 emit，说明新版格式
+            if (videoProgressStarted && !videoEmitted) {
+              emitConstructedVideo();
+            }
+
             if (grok.imageAttachmentInfo) isImage = true;
             const rawToken = grok.token;
 
-            if (isImage) {
+            if (isImage && !videoProgressStarted) {
               const modelResp = grok.modelResponse;
               if (modelResp) {
                 const urls = normalizeGeneratedAssetUrls(modelResp.generatedImageUrls);
@@ -325,11 +383,13 @@ export function createOpenAiStreamFromGrokNdjson(
                   return;
                 }
               } else if (typeof rawToken === "string" && rawToken && !isImage) {
-                // 图像生成模式下跳过描述性文字，只返回图片
                 controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, rawToken)));
               }
               continue;
             }
+
+            // 视频模式下跳过 Grok 的描述性文本（如 "I generated a video with the prompt: ..."）
+            if (videoEmitted) continue;
 
             // Text chat stream
             if (Array.isArray(rawToken)) continue;
@@ -381,6 +441,11 @@ export function createOpenAiStreamFromGrokNdjson(
           }
         }
 
+        // 流结束时，如果还有未发送的视频
+        if (videoProgressStarted && !videoEmitted) {
+          emitConstructedVideo();
+        }
+
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
         if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
@@ -417,6 +482,9 @@ export async function parseOpenAiFromGrokNdjson(
 
   let content = "";
   let model = requestedModel;
+  let trackedUserId = "";
+  let trackedVideoPostId = "";
+
   for (const line of lines) {
     let data: GrokNdjson;
     try {
@@ -431,22 +499,37 @@ export async function parseOpenAiFromGrokNdjson(
     const grok = (data as any).result?.response;
     if (!grok) continue;
 
+    // 提取 userId（从 userResponse 帧）
+    if (!trackedUserId) {
+      const uid = extractUserId(grok);
+      if (uid) trackedUserId = uid;
+    }
+
     const videoResp = grok.streamingVideoGenerationResponse;
-    if (videoResp?.videoUrl && typeof videoResp.videoUrl === "string") {
-      const src = passthrough ? toFullAssetUrl(videoResp.videoUrl) : toImgProxyUrl(global, origin, encodeAssetPath(videoResp.videoUrl));
-      const thumbnailUrl =
-        typeof videoResp.thumbnailImageUrl === "string" ? videoResp.thumbnailImageUrl : "";
-      const posterSrc = thumbnailUrl
-        ? (passthrough ? toFullAssetUrl(thumbnailUrl) : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
-        : "";
-      content = buildVideoHtml({
-        videoUrl: src,
-        posterUrl: posterSrc,
-        posterPreview: opts.settings.video_poster_preview === true,
-      });
-      model = requestedModel;
-      if (!passthrough) warmupCache(src, opts.cookie).catch(() => {});
-      break;
+    if (videoResp) {
+      // 跟踪 videoPostId
+      if (typeof videoResp.videoPostId === "string" && videoResp.videoPostId) {
+        trackedVideoPostId = videoResp.videoPostId;
+      }
+
+      // 旧版 Grok 直接返回 videoUrl
+      if (videoResp.videoUrl && typeof videoResp.videoUrl === "string") {
+        const src = passthrough ? toFullAssetUrl(videoResp.videoUrl) : toImgProxyUrl(global, origin, encodeAssetPath(videoResp.videoUrl));
+        const thumbnailUrl =
+          typeof videoResp.thumbnailImageUrl === "string" ? videoResp.thumbnailImageUrl : "";
+        const posterSrc = thumbnailUrl
+          ? (passthrough ? toFullAssetUrl(thumbnailUrl) : toImgProxyUrl(global, origin, encodeAssetPath(thumbnailUrl)))
+          : "";
+        content = buildVideoHtml({
+          videoUrl: src,
+          posterUrl: posterSrc,
+          posterPreview: opts.settings.video_poster_preview === true,
+        });
+        model = requestedModel;
+        if (!passthrough) warmupCache(src, opts.cookie).catch(() => {});
+        break;
+      }
+      continue;
     }
 
     const modelResp = grok.modelResponse;
@@ -471,6 +554,14 @@ export async function parseOpenAiFromGrokNdjson(
 
     // For normal chat replies, the first modelResponse is enough.
     break;
+  }
+
+  // 新版 Grok 不再返回 videoUrl，用 videoPostId + userId 构造
+  if (trackedVideoPostId && trackedUserId && !content.includes("<video") && !content.includes("<a href=")) {
+    const videoPath = buildVideoPathFromPostId(trackedUserId, trackedVideoPostId);
+    const src = passthrough ? toFullAssetUrl(videoPath) : toImgProxyUrl(global, origin, encodeAssetPath(videoPath));
+    content = buildVideoHtml({ videoUrl: src, posterPreview: opts.settings.video_poster_preview === true });
+    if (!passthrough) warmupCache(src, opts.cookie).catch(() => {});
   }
 
   return {
