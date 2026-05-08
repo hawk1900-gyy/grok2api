@@ -1,6 +1,7 @@
 name = "grok2api"
 main = "src/index.ts"
 compatibility_date = "2026-01-28"
+usage_model = "standard"
 
 # Static assets (admin UI)
 assets = { directory = "./app/template", binding = "ASSETS" }
