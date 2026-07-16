@@ -194,15 +194,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
             );
             postId = post.postId || undefined;
           } else if (imgIds.length === 1) {
-            // 单图图生视频: 建 IMAGE post 并保留 postId 作为 parentPostId（grok 现网/1.5 图生视频协议）
-            const imgAssetUrl = `https://assets.grok.com/${imgUris[0]}`;
-            const post = await createMediaPost(
-              { mediaType: "MEDIA_POST_TYPE_IMAGE", mediaUrl: imgAssetUrl },
-              cookie,
-              settingsBundle.grok,
-              relay,
-            );
-            postId = post.postId || undefined;
+            // 单图图生视频(new_01.txt)：直接用 fileId 作为 parentPostId，无需先建 media post
+            // postId 保持 undefined，payload 构建时由 conversation.ts 用 imgIds[0]
           } else {
             const post = await createMediaPost(
               { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },

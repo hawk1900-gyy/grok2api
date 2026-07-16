@@ -24,6 +24,7 @@ API_KEY = "sk-kEw8uhn9rHirupUgP5guG8KWDqxBahcf"
 VIDEO_MODELS = {
     "0.9": "grok-imagine-0.9",
     "1.0": "grok-imagine-1.0-video",
+    "1.5": "grok-imagine-1.5",
 }
 DEFAULT_MODEL = "grok-imagine-0.9"
 
@@ -270,8 +271,9 @@ def main():
     print("\n选择视频模型:")
     print("  1. grok-imagine-0.9 (经典，5/8 秒)")
     print("  2. grok-imagine-1.0-video (新版，支持 1-15 秒)")
-    choice = input("请选择 (1/2，回车=1): ").strip() or "1"
-    model = VIDEO_MODELS.get("1.0" if choice == "2" else "0.9", DEFAULT_MODEL)
+    print("  3. grok-imagine-1.5 (最新，图生视频)")
+    choice = input("请选择 (1/2/3，回车=1): ").strip() or "1"
+    model = VIDEO_MODELS.get({"2": "1.0", "3": "1.5"}.get(choice, "0.9"), DEFAULT_MODEL)
     print(f"  → 模型: {model}")
 
     # 3. 收集图片

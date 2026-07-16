@@ -105,33 +105,60 @@ export function buildConversationPayload(args: {
       .replace(/^(用户|系统|grok)：/gm, "")
       .trim();
 
+    // ── 单图图生视频：复刻官网抓包 new_01.txt ──────────────────────
+    // message 内嵌 assetUrl + @fileId 作为锚定帧，fileAttachments=[fileId]，
+    // parentPostId=fileId（无需先建 media post），不带 isReferenceToVideo/imageReferences。
+    if (imgIds.length === 1) {
+      const fileId = imgIds[0]!;
+      const assetUrl = assetUrls[0] ?? "";
+      const message = `${assetUrl}  @${fileId} ${textContent} ${modeFlag}`.replace(/\s+/g, " ").trim();
+      const singleImagePayload: Record<string, unknown> = {
+        temporary: true,
+        modelName: "imagine-video-gen",
+        message,
+        fileAttachments: [fileId],
+        enableSideBySide: true,
+        responseMetadata: {
+          experiments: [],
+          modelConfigOverride: {
+            modelMap: {
+              videoGenModelConfig: {
+                parentPostId: fileId,
+                aspectRatio,
+                videoLength,
+                resolutionName,
+              },
+            },
+          },
+        },
+      };
+      return { isVideoModel: true, referer: "https://grok.com/imagine", payload: singleImagePayload };
+    }
+
     let message: string;
+    // 多图/无图：对齐官网现网抓包（new_02 多图参考）：不再发送旧版遗留字段
+    // toolOverrides / coif / isVideoEdit（官方最新抓包都已不带）
     const payload: Record<string, unknown> = {
       temporary: true,
       modelName: "imagine-video-gen",
-      toolOverrides: { videoGen: true },
       enableSideBySide: true,
     };
 
     const videoGenModelConfig: Record<string, unknown> = {
-      parentPostId: postId || (imgIds.length === 1 ? imgIds[0] : ""),
+      parentPostId: postId || "",
       aspectRatio,
       videoLength,
-      isVideoEdit: false,
       resolutionName,
     };
 
     if (isMultiImage) {
+      // new_02.txt：多图参考模式，message 为 @fileId 引用列表，图片走 imageReferences
       if (!postId) throw new Error("多图视频模型缺少 postId（需要先创建 media post）");
       message = `${resolveImageReferences(textContent, imgIds)} ${modeFlag}`.trim();
       videoGenModelConfig.isReferenceToVideo = true;
       videoGenModelConfig.imageReferences = assetUrls;
-    } else if (imgIds.length === 1) {
-      if (!postId) throw new Error("单图视频模型缺少 postId（需要先创建 media post）");
-      message = `${textContent} ${modeFlag}`.trim();
-      videoGenModelConfig.isReferenceToVideo = true;
-      videoGenModelConfig.imageReferences = assetUrls;
     } else {
+      // 无图文生视频
       if (!postId) throw new Error("无图视频模型缺少 postId（需要先创建 media post）");
       message = `${textContent} ${modeFlag}`.trim();
     }
@@ -139,7 +166,6 @@ export function buildConversationPayload(args: {
     payload.message = message;
     payload.responseMetadata = {
       experiments: [],
-      coif: [136, 0],
       modelConfigOverride: {
         modelMap: { videoGenModelConfig },
       },
