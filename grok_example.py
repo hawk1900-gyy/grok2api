@@ -246,25 +246,24 @@ def test_image_generate(model: str = "grok-imagine-1.0"):
         print(f"[异常] {e}")
 
 
-# 视频参数可选值（参考 xAI 官方文档 docs.x.ai）
-# grok-imagine-1.0-video: duration 1-15 秒, aspect_ratio, resolution 720p/480p
-# grok-imagine-0.9: 可能仅支持 5/8 秒，1.0-video 支持更长
+# 视频参数可选值
+# 视频时长支持 1-10 秒（实测）；各视频模型 ID 内部请求一致
 VIDEO_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"]
-VIDEO_LENGTHS = [5, 8, 10, 12, 15]  # 秒，1.0-video 支持 1-15 秒
+VIDEO_LENGTHS = [1, 3, 5, 8, 10]  # 秒，支持 1-10
 VIDEO_RESOLUTIONS = ["480p", "720p"]  # 官方仅 480p/720p，无 1080p
 VIDEO_PRESETS = ["normal", "fun", "spicy"]  # 风格：普通/有趣/刺激（grok2api 扩展）
 
 
 def _input_video_config(model: str = "") -> dict:
-    """交互式输入视频参数，回车使用默认。grok-imagine-1.0-video 支持 1-15 秒"""
+    """交互式输入视频参数，回车使用默认。视频时长支持 1-10 秒"""
     cfg = {}
     print("\n[视频参数] 直接回车使用默认")
     try:
         ar = input(f"  宽高比 {VIDEO_ASPECT_RATIOS} (默认16:9): ").strip() or "16:9"
         if ar in VIDEO_ASPECT_RATIOS:
             cfg["aspect_ratio"] = ar
-        length = input(f"  时长(秒) {VIDEO_LENGTHS} (1.0-video支持10/15秒，默认5): ").strip()
-        if length and length.isdigit():
+        length = input(f"  时长(秒) 1-10 (默认5): ").strip()
+        if length and length.isdigit() and 1 <= int(length) <= 10:
             cfg["video_length"] = int(length)
         res = input(f"  分辨率 {VIDEO_RESOLUTIONS} (默认720p): ").strip() or "720p"
         if res in VIDEO_RESOLUTIONS:

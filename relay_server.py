@@ -19,6 +19,7 @@ import re
 import json
 import time
 import base64
+import threading
 
 from curl_cffi import requests as cffi_requests
 import requests as std_requests
@@ -164,10 +165,19 @@ def _is_error_form_statsig(statsig_b64):
     return txt.startswith(("x0:", "e:", "x1:")) or "TypeError" in txt
 
 
+# 串行化无头浏览器：同一时刻只允许一个抓取任务，避免并发时多个 Chromium 同时驻留导致内存飙升
+_harvest_lock = threading.Lock()
+
+
 def _harvest_statsig(sso, proxy_url=None, timeout_s=60):
     """
     用无头 Chromium 打开 grok.com（登录态），拦截 /rest 请求，抓取真实 x-statsig-id。
     优先返回"真实指纹形式"（非错误串）。返回 dict。
+
+    资源管理：
+      - 全局锁串行执行，任意时刻最多 1 个浏览器进程；
+      - browser 在 finally 中确保 close()，即使异常也不残留进程；
+      - with sync_playwright() 退出时停止 driver，二次兜底回收。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -178,41 +188,54 @@ def _harvest_statsig(sso, proxy_url=None, timeout_s=60):
     captured = []  # (url, statsig)
     t0 = time.time()
 
+    # 抢锁：若已有抓取在跑，最多等 timeout_s，仍拿不到就返回 busy（不再叠加新浏览器）
+    if not _harvest_lock.acquire(timeout=max(5, timeout_s)):
+        return {"ok": False, "error": "harvester busy（已有抓取任务在运行）", "captured": 0}
+
     try:
         with sync_playwright() as p:
-            launch_kwargs = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-            }
-            if proxy_dict:
-                launch_kwargs["proxy"] = proxy_dict
-            browser = p.chromium.launch(**launch_kwargs)
-            ctx = browser.new_context(user_agent=_STATSIG_UA, viewport={"width": 1280, "height": 800})
-            ctx.add_cookies([
-                {"name": "sso", "value": sso, "domain": ".grok.com", "path": "/"},
-                {"name": "sso-rw", "value": sso, "domain": ".grok.com", "path": "/"},
-            ])
-            page = ctx.new_page()
-
-            def on_request(req):
-                v = req.headers.get("x-statsig-id")
-                if v:
-                    captured.append((req.url, v))
-
-            page.on("request", on_request)
+            browser = None
             try:
-                page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=timeout_s * 1000)
-            except Exception:
-                pass
-            # 等 app 水合并发出后台 /rest 请求（这些请求会带 x-statsig-id）
-            deadline = t0 + timeout_s
-            while time.time() < deadline:
-                page.wait_for_timeout(1000)
-                if any(not _is_error_form_statsig(s) for _, s in captured):
-                    break
-            browser.close()
+                launch_kwargs = {
+                    "headless": True,
+                    "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                }
+                if proxy_dict:
+                    launch_kwargs["proxy"] = proxy_dict
+                browser = p.chromium.launch(**launch_kwargs)
+                ctx = browser.new_context(user_agent=_STATSIG_UA, viewport={"width": 1280, "height": 800})
+                ctx.add_cookies([
+                    {"name": "sso", "value": sso, "domain": ".grok.com", "path": "/"},
+                    {"name": "sso-rw", "value": sso, "domain": ".grok.com", "path": "/"},
+                ])
+                page = ctx.new_page()
+
+                def on_request(req):
+                    v = req.headers.get("x-statsig-id")
+                    if v:
+                        captured.append((req.url, v))
+
+                page.on("request", on_request)
+                try:
+                    page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=timeout_s * 1000)
+                except Exception:
+                    pass
+                # 等 app 水合并发出后台 /rest 请求（这些请求会带 x-statsig-id）
+                deadline = t0 + timeout_s
+                while time.time() < deadline:
+                    page.wait_for_timeout(1000)
+                    if any(not _is_error_form_statsig(s) for _, s in captured):
+                        break
+            finally:
+                if browser is not None:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
     except Exception as e:
         return {"ok": False, "error": f"harvest 异常: {e}", "captured": len(captured)}
+    finally:
+        _harvest_lock.release()
 
     if not captured:
         return {"ok": False, "error": "未抓到任何 x-statsig-id（可能 SSO 失效或页面未登录）", "captured": 0}

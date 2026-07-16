@@ -197,7 +197,7 @@ CF Worker 与 relay 之间通过 `X-Relay-Secret` Header 认证，在管理后�
 ```
 
 **关键参数映射：**
-- `videoLength`: 整数秒（1-15），客户端传 `video_config.video_length`
+- `videoLength`: 整数秒（1-10，实测上限），客户端传 `video_config.video_length`
 - `resolutionName`: `"720p"` 或 `"480p"`，客户端传 `video_config.resolution`
 - `aspectRatio`: 宽高比字符串（默认 "2:3"），客户端传 `video_config.aspect_ratio`
 - `parentPostId`: 单图=createPost(imageUri) 返回的 ID；多图/无图=createMediaPost(VIDEO) 返回的 ID

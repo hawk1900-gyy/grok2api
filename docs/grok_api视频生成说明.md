@@ -2,7 +2,7 @@
 
 ## 概述
 
-通过 Grok2API 的 OpenAI 兼容接口生成视频。支持 1~7 张参考图片 + 提示词，生成 5~15 秒的短视频。
+通过 Grok2API 的 OpenAI 兼容接口生成视频。支持 1~7 张参考图片 + 提示词，生成 1~10 秒的短视频。
 
 本文档基于 **X-Raw-Token 模式**：客户端直接提供 grok.com SSO Token，生成的视频通过 `assets.grok.com` 直接下载。
 
@@ -22,10 +22,15 @@
 
 ## 视频模型
 
+统一使用一个模型 ID：
+
 | 模型 ID | 说明 |
 |---------|------|
-| `grok-imagine-0.9` | 经典视频模型，支持 5/8 秒 |
-| `grok-imagine-1.0-video` | 新版模型，支持 1-15 秒，画质更高 |
+| `grok-imagine-1.0-video` | 图生视频模型，支持 1-10 秒 |
+
+> 说明：grok2api 还接受 `grok-imagine-0.9` / `grok-imagine-1.5` 等别名，但这些视频 ID
+> **发给 grok 的请求完全一致**（都走 `imagine-video-gen`，payload 不含版本字段），实际版本由 grok 服务端决定，
+> **无法通过 model ID 强制指定**。因此本文档统一用 `grok-imagine-1.0-video`。
 
 ## API 接口
 
@@ -49,7 +54,7 @@ X-Raw-Token: <SSO_TOKEN>
 
 ```json
 {
-  "model": "grok-imagine-0.9",
+  "model": "grok-imagine-1.0-video",
   "messages": [
     {
       "role": "user",
@@ -76,21 +81,30 @@ X-Raw-Token: <SSO_TOKEN>
 
 #### 图片格式
 
-图片通过 `data URL` 内嵌（base64 编码）：
+`image_url.url` 支持两种形式（可混用）：
+
+**① base64 data URL**（本地图片自行编码）：
 
 ```
 data:image/jpeg;base64,/9j/4AAQSkZJRg...
 data:image/png;base64,iVBORw0KGgo...
 ```
 
-支持 JPEG 和 PNG，单张建议不超过 5 MB。
+**② 公网 URL**（http/https），由 **CF worker 服务端下载**后再上传 grok：
+
+```
+https://example.com/photo.jpg
+```
+
+> 公网 URL 须公网可达（CF 出口 IP 能访问）；带 `Expires` 的签名链接（OSS/S3）过期后会下载失败；
+> 需鉴权且限 IP 的内网地址无法使用。支持 JPEG / PNG，单张建议不超过 5 MB。
 
 #### video_config 参数
 
 | 参数 | 类型 | 可选值 | 默认 | 说明 |
 |------|------|--------|------|------|
 | `aspect_ratio` | string | `16:9` `9:16` `1:1` `4:3` `3:4` `3:2` `2:3` | `16:9` | 视频宽高比 |
-| `video_length` | int | `5` `8` `10` `12` `15` | `5` | 视频时长（秒），0.9 模型仅 5/8 秒 |
+| `video_length` | int | `1` ~ `10` | `5` | 视频时长（秒） |
 | `resolution` | string | `480p` `720p` | `720p` | 分辨率 |
 
 #### 多图 + @图N 引用
@@ -110,13 +124,16 @@ data:image/png;base64,iVBORw0KGgo...
 
 图片按 content 数组中出现的顺序编号：第 1 张 = `@图1`，第 2 张 = `@图2`，以此类推。
 
+> **单图 vs 多图**：单图时**无需写 `@图N`**，grok2api 会把这张图作为锚定帧，生成的视频**严格贴合源图**；
+> 多图时用 `@图N` 告诉 grok 各片段参考哪张图（编号 = 图片在请求中的顺序）。
+
 ### 响应
 
 ```json
 {
   "id": "chatcmpl-xxx",
   "object": "chat.completion",
-  "model": "grok-imagine-0.9",
+  "model": "grok-imagine-1.0-video",
   "choices": [
     {
       "index": 0,
@@ -187,11 +204,12 @@ from grok_video_example import generate_video, download_video
 
 SSO_TOKEN = "eyJ0eXAi..."
 
-# 生成
+# 生成（image_paths 每项可为本地文件路径，或公网 http(s) URL，可混用）
 result = generate_video(
     raw_token=SSO_TOKEN,
-    image_paths=["photo.jpg"],
+    image_paths=["photo.jpg"],           # 或 "https://example.com/photo.jpg"
     prompt="让画面中的人物动起来",
+    model="grok-imagine-1.0-video",
     video_length=5,
 )
 

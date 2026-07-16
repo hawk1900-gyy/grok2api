@@ -3,6 +3,10 @@
 Grok2API 视频生成示例（轻量版）
 仅支持远程 Cloudflare Workers + X-Raw-Token 模式
 生成的视频通过 assets.grok.com 直接下载，自动携带 SSO Cookie
+
+图片输入支持两种形式（可混用）：
+  1. 本地文件：脚本会读取并转成 base64 data URL 上传
+  2. 公网 URL（http/https）：原样传给 CF，由 worker 下载后再上传 grok
 """
 import base64
 import json
@@ -21,12 +25,10 @@ BASE_URL = "https://grok2api.hawk-bc-1900.workers.dev"
 API_KEY = "sk-kEw8uhn9rHirupUgP5guG8KWDqxBahcf"
 
 # 视频模型
-VIDEO_MODELS = {
-    "0.9": "grok-imagine-0.9",
-    "1.0": "grok-imagine-1.0-video",
-    "1.5": "grok-imagine-1.5",
-}
-DEFAULT_MODEL = "grok-imagine-0.9"
+# 注意：0.9 / 1.0-video / 1.5 三个 ID 发给 grok 的请求完全一致（都走 imagine-video-gen，
+# payload 不含版本字段），实际版本由 grok 服务端决定，无法通过 model ID 强制指定。默认用一个即可。
+VIDEO_MODELS = ["grok-imagine-0.9", "grok-imagine-1.0-video", "grok-imagine-1.5"]
+DEFAULT_MODEL = "grok-imagine-1.0-video"
 
 # 视频参数可选值
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"]
@@ -50,7 +52,7 @@ def generate_video(
 
     Args:
         raw_token:    grok.com SSO JWT（必须）
-        image_paths:  参考图片路径列表（1~7 张）
+        image_paths:  参考图（1~7 项），每项可为本地文件路径或公网 http(s) URL
         prompt:       提示词，多图时可用 @图1 @图2 引用
         model:        视频模型 ID
         aspect_ratio: 宽高比
@@ -78,12 +80,12 @@ def generate_video(
 
     raw_token = raw_token.strip()
 
-    # 构建 multimodal messages
+    # 构建 multimodal messages（本地文件转 base64；公网 URL 原样透传给 CF 下载）
     content_parts = []
-    for path in image_paths:
+    for item in image_paths:
         content_parts.append({
             "type": "image_url",
-            "image_url": {"url": _image_to_data_url(path)},
+            "image_url": {"url": _to_image_url(item)},
         })
     content_parts.append({"type": "text", "text": prompt})
 
@@ -181,6 +183,17 @@ def download_video(url: str, raw_token: str, save_path: str, timeout: int = 120)
 
 # ── 内部工具 ─────────────────────────────────────────────────
 
+def _is_http_url(s: str) -> bool:
+    return s.strip().lower().startswith(("http://", "https://"))
+
+
+def _to_image_url(item: str) -> str:
+    """本地文件 → base64 data URL；http(s) 链接 → 原样返回（交给 CF worker 下载）。"""
+    if _is_http_url(item):
+        return item.strip()
+    return _image_to_data_url(item)
+
+
 def _image_to_data_url(path: str) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(f"图片不存在: {path}")
@@ -211,8 +224,8 @@ def _extract_video_urls(content: str) -> tuple[str, str]:
 # ── 交互式 CLI ───────────────────────────────────────────────
 
 def _cli_collect_images() -> list[str]:
-    """交互收集图片路径"""
-    print("\n[图片选择] 最多 7 张，放在 video/ 目录下可只写文件名")
+    """交互收集图片：支持本地文件名/路径，或公网 http(s) URL"""
+    print("\n[图片选择] 最多 7 张，放在 video/ 目录下可只写文件名，也可粘贴 http(s) 图片链接")
     print("  逐行输入，空行结束；直接回车使用默认 test001.jpg")
     paths = []
     for i in range(7):
@@ -229,6 +242,9 @@ def _cli_collect_images() -> list[str]:
                 else:
                     print(f"    默认图片不存在: {default}")
             break
+        if _is_http_url(s):
+            paths.append(s)
+            continue
         p = s if os.path.isabs(s) else os.path.join(VIDEO_DIR, s)
         if not os.path.isfile(p):
             print(f"    [跳过] 文件不存在: {p}")
@@ -245,8 +261,8 @@ def _cli_input_config() -> dict:
         ar = input(f"  宽高比 {ASPECT_RATIOS} (默认16:9): ").strip()
         if ar in ASPECT_RATIOS:
             cfg["aspect_ratio"] = ar
-        length = input(f"  时长(秒) [5,8,10,12,15] (默认5): ").strip()
-        if length and length.isdigit() and int(length) > 0:
+        length = input(f"  时长(秒) 1-10 (默认5): ").strip()
+        if length and length.isdigit() and 1 <= int(length) <= 10:
             cfg["video_length"] = int(length)
         res = input(f"  分辨率 {RESOLUTIONS} (默认720p): ").strip()
         if res in RESOLUTIONS:
@@ -267,14 +283,12 @@ def main():
         print("[错误] Token 不能为空")
         return
 
-    # 2. 选择模型
-    print("\n选择视频模型:")
-    print("  1. grok-imagine-0.9 (经典，5/8 秒)")
-    print("  2. grok-imagine-1.0-video (新版，支持 1-15 秒)")
-    print("  3. grok-imagine-1.5 (最新，图生视频)")
-    choice = input("请选择 (1/2/3，回车=1): ").strip() or "1"
-    model = VIDEO_MODELS.get({"2": "1.0", "3": "1.5"}.get(choice, "0.9"), DEFAULT_MODEL)
+    # 2. 视频模型（各版本内部请求一致，默认用 1.0-video；时长支持 1-10 秒；回车即可）
+    model = input(f"\n视频模型 (回车默认 {DEFAULT_MODEL}): ").strip() or DEFAULT_MODEL
+    if model not in VIDEO_MODELS:
+        print(f"  [提示] {model} 非已知视频模型，仍按你输入的发送")
     print(f"  → 模型: {model}")
+    print("  (0.9 / 1.0-video / 1.5 内部请求一致，实际版本由 grok 服务端决定)")
 
     # 3. 收集图片
     image_paths = _cli_collect_images()
@@ -283,7 +297,8 @@ def main():
         return
     print(f"\n已选择 {len(image_paths)} 张图片:")
     for i, p in enumerate(image_paths, 1):
-        print(f"  图{i} = {os.path.basename(p)}")
+        label = p if _is_http_url(p) else os.path.basename(p)
+        print(f"  图{i} = {label}")
 
     # 4. 提示词
     if len(image_paths) > 1:
@@ -299,8 +314,10 @@ def main():
     print(f"  → 参数: {cfg}")
 
     # 6. 生成
-    total_mb = sum(os.path.getsize(p) for p in image_paths) / 1024 / 1024
-    print(f"\n正在上传 {len(image_paths)} 张图片 ({total_mb:.1f} MB) 并生成视频...")
+    local_imgs = [p for p in image_paths if not _is_http_url(p)]
+    url_imgs = [p for p in image_paths if _is_http_url(p)]
+    total_mb = sum(os.path.getsize(p) for p in local_imgs) / 1024 / 1024
+    print(f"\n正在提交 {len(image_paths)} 张图片（本地 {len(local_imgs)} 张 {total_mb:.1f} MB，URL {len(url_imgs)} 张）并生成视频...")
     print("请稍候（约 1-3 分钟）...\n")
 
     try:

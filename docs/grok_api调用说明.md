@@ -46,7 +46,12 @@ POST {BASE_URL}/v1/chat/completions
 Authorization: Bearer {API_KEY}
 Content-Type: application/json
 X-Token-Suffix: XXXX          # 可选，指定使用后缀匹配的 Grok Token（调试用）
+X-Raw-Token: {SSO_JWT}        # 可选，直接指定本次请求使用的 grok.com SSO Token
 ```
+
+> **X-Raw-Token 模式**：当带上 `X-Raw-Token`（值为 grok.com 的 SSO JWT）时，本次请求不走后台 Token 池，
+> 而是用你指定的 SSO；且视频/图片会返回 **assets.grok.com 原始直链**（下载时需带 `Cookie: sso=<JWT>;sso-rw=<JWT>`）。
+> 不带该头时走后台 Token 池，返回经 `/images/` 代理的链接。
 
 ---
 
@@ -56,8 +61,13 @@ X-Token-Suffix: XXXX          # 可选，指定使用后缀匹配的 Grok Token�
 |---------|------|------|
 | `grok-imagine-1.0` | 图片生成 | 文本描述 → 图片（每次 2 张） |
 | `grok-imagine-0.9` | 视频生成 | 图片 + 提示词 → 视频（5/8 秒） |
-| `grok-imagine-1.0-video` | 视频生成 | 图片 + 提示词 → 视频（1-15 秒，支持多图 @引用） |
-| `grok-3` 等 | 对话 | 普通文本对话 |
+| `grok-imagine-1.0-video` | 视频生成 | 图片 + 提示词 → 视频（1-10 秒，支持多图 @引用） |
+| `grok-imagine-1.5` | 视频生成 | 最新图生视频（需 1 张源图，1-10 秒） |
+| `grok-3` / `grok-4` / `grok-4.1` 等 | 对话 | 普通文本对话（含 fast/expert/thinking 变体） |
+
+> **关于视频模型版本**：`grok-imagine-0.9` / `1.0-video` / `1.5` 三个 ID 在 grok2api 内部**发出的请求完全一致**
+> （都映射到 grok 的 `imagine-video-gen`，payload 里不含版本字段）。实际生成用的模型版本由 grok 服务端按账号/当前默认决定，
+> **无法通过 model ID 强制指定**。选哪个都可以，仅作为语义标识。
 
 ---
 
@@ -90,6 +100,9 @@ X-Token-Suffix: XXXX          # 可选，指定使用后缀匹配的 Grok Token�
 }
 ```
 
+> 单图时**无需写 `@图N`**：grok2api 会自动把这张图作为锚定帧（对齐官网抓包 `new_01`），
+> 生成的视频会**严格贴合这张源图**（image-to-video 锚定）。
+
 ### 5.3 messages 格式 — 多图 + @引用视频（重点）
 
 传入 **2~7 张图片** + 带 `@图N` 引用的文本：
@@ -119,7 +132,7 @@ X-Token-Suffix: XXXX          # 可选，指定使用后缀匹配的 Grok Token�
 | **按顺序编号** | content 数组中第 1 个 `image_url` = `@图1`，第 2 个 = `@图2`，以此类推 |
 | **与文件名无关** | 编号纯粹取决于图片在请求中的排列顺序 |
 | **最多 7 张** | 单次请求最多传入 7 张图片 |
-| **仅视频模型有效** | `@图N` 引用仅在视频模型（`grok-imagine-0.9`、`grok-imagine-1.0-video`）下生效 |
+| **仅视频模型有效** | `@图N` 引用仅在视频模型（`grok-imagine-0.9`、`grok-imagine-1.0-video`、`grok-imagine-1.5`）下生效 |
 | **不用也可以** | 多图时不写 `@图N` 也行，Grok 会自动参考所有图片 |
 
 **对应关系示意**：
@@ -147,7 +160,7 @@ grok2api 上传图片，获得 fileId 列表: [id_a, id_b, id_c]
 | 参数 | 类型 | 默认值 | 说明 | 可选值 |
 |------|------|--------|------|--------|
 | aspect_ratio | string | `"2:3"` | 宽高比 | 16:9, 9:16, 1:1, 4:3, 3:4, 3:2, 2:3 |
-| video_length | number | `6` | 时长（秒） | 1-15（1.0-video）；5/8（0.9） |
+| video_length | number | `6` | 时长（秒） | 1-10 |
 | resolution | string | `"480p"` | 分辨率 | 480p, 720p |
 | preset | string | `"normal"` | 风格 | normal, fun, spicy |
 
@@ -163,7 +176,11 @@ grok2api 上传图片，获得 fileId 列表: [id_a, id_b, id_c]
 | 格式 | 示例 | 说明 |
 |------|------|------|
 | base64 data URL | `data:image/jpeg;base64,/9j/...` | 本地图片需先转 base64 |
-| 公网 URL | `https://example.com/photo.jpg` | 必须可公网访问 |
+| 公网 URL | `https://example.com/photo.jpg` | 由 **CF worker 服务端下载**后再上传 grok |
+
+> **公网 URL 说明**：worker 会在服务端 `fetch()` 该链接、下载图片字节 → base64 → 上传 grok（见 `src/grok/upload.ts`）。
+> 因此：① 链接必须**公网可达**（CF 出口 IP 能访问）；② 若是带 `Expires` 的签名链接（如 OSS/S3），**过期后会下载失败**；
+> ③ 需鉴权且限 IP 的内网地址无法使用。混用本地文件和 URL 也没问题。
 
 本地图片转 base64 的 Python 方法：
 
@@ -196,7 +213,7 @@ def image_to_data_url(path):
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "<video src=\"https://grok2api.xxx/images/p_xxx\" controls=\"controls\" width=\"500\" height=\"300\"></video>\n"
+        "content": "<video src=\"https://assets.grok.com/users/.../generated_video.mp4\" controls=\"controls\" width=\"500\" height=\"300\"></video>\n"
       },
       "finish_reason": "stop"
     }
@@ -204,7 +221,12 @@ def image_to_data_url(path):
 }
 ```
 
-视频 URL 通过 Grok2API 的 `/images/` 代理访问，可绕过 Grok 直链 403 限制。
+视频 URL 有两种形态，取决于是否使用 `X-Raw-Token`：
+
+| 模式 | 返回的视频 URL | 下载方式 |
+|------|----------------|----------|
+| **X-Raw-Token** | `https://assets.grok.com/.../generated_video.mp4` 原始直链 | 需带 `Cookie: sso=<JWT>;sso-rw=<JWT>`；CDN 可能延迟就绪，404 时重试 |
+| **后台 Token 池** | 经 `/images/` 代理的链接 | 直接 GET，代理会绕过 Grok 直链 403 |
 
 ### 6.2 错误响应
 
@@ -327,6 +349,49 @@ out, content = chat_completion(
 print(content)
 ```
 
+### 7.5 公网 URL 图生视频（直接传链接，CF 下载）
+
+`image_url.url` 直接填 http(s) 链接即可，无需本地转 base64，worker 会在服务端下载：
+
+```bash
+curl -X POST "https://grok2api.xxx.workers.dev/v1/chat/completions" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-Raw-Token: YOUR_SSO_JWT" \
+  -d '{
+    "model": "grok-imagine-1.0-video",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "image_url", "image_url": {"url": "https://example.com/p_03.jpg"}},
+          {"type": "text", "text": "让画面中的人物自然说话，镜头轻微推进"}
+        ]
+      }
+    ],
+    "stream": false,
+    "video_config": {"aspect_ratio": "9:16", "video_length": 5, "resolution": "720p"}
+  }'
+```
+
+使用 `grok_video_example.py`（本地文件与公网 URL 可混用）：
+
+```python
+from grok_video_example import generate_video, download_video
+
+result = generate_video(
+    raw_token="YOUR_SSO_JWT",
+    image_paths=[
+        "https://example.com/p_03.jpg",   # 公网 URL：CF 下载
+        "video/test001.jpg",               # 本地文件：转 base64
+    ],
+    prompt="@图1 的人物走向 @图2 的人物",
+    model="grok-imagine-1.0-video",
+    aspect_ratio="9:16", video_length=5, resolution="720p",
+)
+download_video(result["video_url"], "YOUR_SSO_JWT", "video/out.mp4")
+```
+
 ---
 
 ## 八、grok_example.py 使用指南
@@ -408,23 +473,30 @@ download_media(video_url, "video/generated.mp4")
 
 ## 十、单图 vs 多图 — 内部处理差异
 
-理解这部分有助于排查问题。Grok2API 内部对单图和多图的处理方式不同：
+理解这部分有助于排查问题。Grok2API 内部对单图和多图的处理方式不同，两者均已对齐官网现网抓包
+（单图 = `new_01`，多图 = `new_02`）：
 
-| | 单图 | 多图（2~7 张） |
+| | 单图（1 张） | 多图（2~7 张） |
 |---|---|---|
 | **图片上传** | 上传 1 张 → 获得 fileId | 并行上传多张 → 获得 fileId 列表 |
-| **message 构造** | `https://assets.grok.com/{uri}  提示词 --mode=xxx` | `@{fileId1} ... @{fileId2} ... --mode=xxx` |
+| **message 构造** | `https://assets.grok.com/{uri}  @{fileId} 提示词 --mode=xxx` | `@{fileId1} ... @{fileId2} ... --mode=xxx` |
 | **fileAttachments** | `[fileId]` | 不传 |
 | **isReferenceToVideo** | 不设置 | `true` |
 | **imageReferences** | 不设置 | `[assetUrl1, assetUrl2, ...]` |
-| **parentPostId** | 通过 createPost(图片) 获取 | 通过 createMediaPost(视频容器) 获取 |
+| **parentPostId** | **直接用 fileId**（不再建 media post） | 通过 createMediaPost(视频容器) 获取 |
+| **createMediaPost** | 跳过 | 调用（拿 parentPostId） |
+
+> **单图 = 锚定帧模式**：把源图作为视频的锚定帧（`fileAttachments` + `@fileId` + `parentPostId=fileId`），
+> 出片严格贴图；**多图 = 参考模式**：图片走 `imageReferences`，`@图N` 引用告诉 grok 各片段参考哪张。
+>
+> 另外，已移除官网现网不再发送的旧版字段：`toolOverrides` / `coif` / `isVideoEdit`。
 
 ---
 
 ## 十一、注意事项
 
 1. **超时**：视频生成约 1-3 分钟，请求 `timeout` 建议设为 300 秒
-2. **模型差异**：`grok-imagine-1.0-video` 支持 1-15 秒；`grok-imagine-0.9` 可能仅 5/8 秒
+2. **视频时长**：支持 1-10 秒（各视频模型 ID 内部请求一致，时长上限相同）
 3. **图片数量**：所有模型最多 7 张图片，超出的会被截断
 4. **@引用限制**：`@图N` 引用仅在视频模型的 Imagine 模式下生效，普通对话模型中无效
 5. **base_url**：管理后台需正确设置 `base_url`，否则返回的视频 URL 可能无法访问
