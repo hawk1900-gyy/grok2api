@@ -100,12 +100,15 @@ export function buildConversationPayload(args: {
 
     const assetUrls = imgUris.map((uri) => `https://assets.grok.com/${uri}`);
     const isMultiImage = imgIds.length > 1;
-    const textContent = String(content || "").trim();
+    // 视频 prompt 不需要 extractContent 加的 "用户：/系统：/grok：" 角色前缀，去掉以免污染生成提示
+    const textContent = String(content || "")
+      .replace(/^(用户|系统|grok)：/gm, "")
+      .trim();
 
     let message: string;
     const payload: Record<string, unknown> = {
       temporary: true,
-      modelName: grokModel,
+      modelName: "imagine-video-gen",
       toolOverrides: { videoGen: true },
       enableSideBySide: true,
     };
@@ -124,8 +127,10 @@ export function buildConversationPayload(args: {
       videoGenModelConfig.isReferenceToVideo = true;
       videoGenModelConfig.imageReferences = assetUrls;
     } else if (imgIds.length === 1) {
-      message = `${assetUrls[0]}  @${imgIds[0]} ${textContent} ${modeFlag}`.trim();
-      payload.fileAttachments = [imgIds[0]];
+      if (!postId) throw new Error("单图视频模型缺少 postId（需要先创建 media post）");
+      message = `${textContent} ${modeFlag}`.trim();
+      videoGenModelConfig.isReferenceToVideo = true;
+      videoGenModelConfig.imageReferences = assetUrls;
     } else {
       if (!postId) throw new Error("无图视频模型缺少 postId（需要先创建 media post）");
       message = `${textContent} ${modeFlag}`.trim();

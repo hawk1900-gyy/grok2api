@@ -15,7 +15,10 @@ Grok2API 中转模块 (Flask Blueprint)
   app.register_blueprint(relay_bp)
 """
 import os
+import re
 import json
+import time
+import base64
 
 from curl_cffi import requests as cffi_requests
 import requests as std_requests
@@ -128,6 +131,106 @@ def _check_secret():
     return True
 
 
+# ── statsig 抓取（无头浏览器）──
+
+_STATSIG_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+)
+
+
+def _parse_proxy_for_playwright(proxy_url):
+    """把 http://user:pass@host:port 解析成 Playwright 需要的 dict。无代理返回 None。"""
+    if not proxy_url:
+        return None
+    m = re.match(r"^(https?)://(?:([^:@]+):([^@]*)@)?([^:/@]+):(\d+)", proxy_url.strip())
+    if not m:
+        return None
+    scheme, user, pwd, host, port = m.groups()
+    out = {"server": f"{scheme}://{host}:{port}"}
+    if user:
+        out["username"] = user
+        out["password"] = pwd or ""
+    return out
+
+
+def _is_error_form_statsig(statsig_b64):
+    """判断是否为 grok SDK 的降级"错误字符串"形式（x0:/e:/x1: + TypeError），这种不稳定，应尽量避开。"""
+    try:
+        raw = base64.b64decode(statsig_b64 + "==")
+        txt = raw.decode("ascii")
+    except Exception:
+        return False  # 解不成 ascii → 二进制真实指纹形式
+    return txt.startswith(("x0:", "e:", "x1:")) or "TypeError" in txt
+
+
+def _harvest_statsig(sso, proxy_url=None, timeout_s=60):
+    """
+    用无头 Chromium 打开 grok.com（登录态），拦截 /rest 请求，抓取真实 x-statsig-id。
+    优先返回"真实指纹形式"（非错误串）。返回 dict。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        return {"ok": False, "error": f"playwright 未安装: {e}"}
+
+    proxy_dict = _parse_proxy_for_playwright(proxy_url)
+    captured = []  # (url, statsig)
+    t0 = time.time()
+
+    try:
+        with sync_playwright() as p:
+            launch_kwargs = {
+                "headless": True,
+                "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            }
+            if proxy_dict:
+                launch_kwargs["proxy"] = proxy_dict
+            browser = p.chromium.launch(**launch_kwargs)
+            ctx = browser.new_context(user_agent=_STATSIG_UA, viewport={"width": 1280, "height": 800})
+            ctx.add_cookies([
+                {"name": "sso", "value": sso, "domain": ".grok.com", "path": "/"},
+                {"name": "sso-rw", "value": sso, "domain": ".grok.com", "path": "/"},
+            ])
+            page = ctx.new_page()
+
+            def on_request(req):
+                v = req.headers.get("x-statsig-id")
+                if v:
+                    captured.append((req.url, v))
+
+            page.on("request", on_request)
+            try:
+                page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=timeout_s * 1000)
+            except Exception:
+                pass
+            # 等 app 水合并发出后台 /rest 请求（这些请求会带 x-statsig-id）
+            deadline = t0 + timeout_s
+            while time.time() < deadline:
+                page.wait_for_timeout(1000)
+                if any(not _is_error_form_statsig(s) for _, s in captured):
+                    break
+            browser.close()
+    except Exception as e:
+        return {"ok": False, "error": f"harvest 异常: {e}", "captured": len(captured)}
+
+    if not captured:
+        return {"ok": False, "error": "未抓到任何 x-statsig-id（可能 SSO 失效或页面未登录）", "captured": 0}
+
+    # 优先真实指纹形式；其次退回任意（含错误串）
+    real = [(u, s) for (u, s) in captured if not _is_error_form_statsig(s)]
+    chosen_url, chosen = (real[0] if real else captured[0])
+    return {
+        "ok": True,
+        "x_statsig_id": chosen,
+        "form": "real" if not _is_error_form_statsig(chosen) else "error",
+        "source": chosen_url,
+        "captured": len(captured),
+        "real_count": len(real),
+        "elapsed_ms": int((time.time() - t0) * 1000),
+    }
+
+
 # ── 路由 ──
 
 @relay_bp.route("/relay/ping", methods=["GET"])
@@ -143,6 +246,51 @@ def relay_ping():
         "proxies": len(proxy_list),
         "proxy_names": proxy_names,
     })
+
+
+@relay_bp.route("/relay/statsig", methods=["POST"])
+def relay_statsig():
+    """
+    用无头浏览器抓取一个真实、可用的 x-statsig-id。
+    请求体: { "sso": "<grok sso token>", "timeout": 60(可选) }
+    statsig 账号无关：可用专门的抓取小号 sso，抓到的 id 全池通用。
+    返回: { "ok": true, "x_statsig_id": "...", "form": "real|error", ... }
+    """
+    if not _check_secret():
+        return jsonify({"ok": False, "error": "invalid secret"}), 403
+
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"invalid JSON body: {e}"}), 400
+
+    sso = (data.get("sso") or "").strip()
+    if sso.startswith("sso="):
+        sso = sso[4:]
+    if not sso:
+        return jsonify({"ok": False, "error": "missing sso"}), 400
+
+    try:
+        timeout_s = int(data.get("timeout", 60))
+    except Exception:
+        timeout_s = 60
+    timeout_s = max(20, min(timeout_s, 120))
+
+    # 选一个住宅代理（VPS 裸 IP 会被 grok 墙）；取优先级最高的已启用代理
+    _, proxy_list = _load_proxy_config()
+    proxy_url = proxy_list[0]["proxy"].strip() if proxy_list else None
+
+    debug_print(f"relay_server: /relay/statsig 开始抓取 (proxy={'有' if proxy_url else '无(直连)'}, timeout={timeout_s}s)")
+    result = _harvest_statsig(sso, proxy_url=proxy_url, timeout_s=timeout_s)
+
+    if result.get("ok"):
+        debug_print(f"relay_server: statsig 抓取成功 form={result['form']} "
+                    f"real={result.get('real_count')}/{result.get('captured')} "
+                    f"elapsed={result.get('elapsed_ms')}ms")
+        return jsonify(result)
+    else:
+        debug_print(f"Error:relay_server: statsig 抓取失败: {result.get('error')}")
+        return jsonify(result), 502
 
 
 @relay_bp.route("/relay", methods=["POST"])

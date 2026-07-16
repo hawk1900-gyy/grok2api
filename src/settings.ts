@@ -17,6 +17,8 @@ export interface GrokSettings {
   cf_clearance?: string; // stored as VALUE only (no "cf_clearance=" prefix)
   x_statsig_id?: string;
   dynamic_statsig?: boolean;
+  statsig_harvest_sso?: string; // 专用于无头浏览器抓取 statsig 的 sso（留空则用当前请求 token）
+  statsig_last_refresh?: number; // 上次自动刷新 x_statsig_id 的时间戳(ms)，用于节流
   filtered_tags?: string;
   show_thinking?: boolean;
   video_poster_preview?: boolean;
@@ -72,6 +74,8 @@ export const DEFAULT_GROK_SETTINGS: Required<GrokSettings> = {
   cf_clearance: "",
   x_statsig_id: "",
   dynamic_statsig: true,
+  statsig_harvest_sso: "",
+  statsig_last_refresh: 0,
   filtered_tags: "xaiartifact,xai:tool_usage_card",
   show_thinking: true,
   video_poster_preview: false,

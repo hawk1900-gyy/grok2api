@@ -5,6 +5,7 @@ import { requireApiAuth } from "../auth";
 import { getSettings, normalizeCfCookie, getRelaySettings } from "../settings";
 import { isValidModel, MODEL_CONFIG } from "../grok/models";
 import { extractContent, buildConversationPayload, sendConversationRequest, resolveImageReferences, type RelayOption } from "../grok/conversation";
+import { maybeRefreshStatsig } from "../grok/statsig";
 import { uploadImage } from "../grok/upload";
 import { createMediaPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
@@ -132,6 +133,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
     const isVideoModel = Boolean(cfg.is_video_model);
     const maxRetry = isVideoModel ? 6 : 3;
     let lastErr: string | null = null;
+    let statsigRefreshed = false; // 本次请求内只自动刷新一次 x-statsig-id
 
     const forceSuffix = c.req.header("X-Token-Suffix")?.trim() || "";
     const rawToken = c.req.header("X-Raw-Token")?.trim() || "";
@@ -192,14 +194,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
             );
             postId = post.postId || undefined;
           } else if (imgIds.length === 1) {
-            // 单图: grok.com 也会调 create（MEDIA_POST_TYPE_IMAGE），用于注册媒体存储
+            // 单图图生视频: 建 IMAGE post 并保留 postId 作为 parentPostId（grok 现网/1.5 图生视频协议）
             const imgAssetUrl = `https://assets.grok.com/${imgUris[0]}`;
-            await createMediaPost(
+            const post = await createMediaPost(
               { mediaType: "MEDIA_POST_TYPE_IMAGE", mediaUrl: imgAssetUrl },
               cookie,
               settingsBundle.grok,
               relay,
             );
+            postId = post.postId || undefined;
           } else {
             const post = await createMediaPost(
               { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: content },
@@ -232,7 +235,27 @@ openAiRoutes.post("/chat/completions", async (c) => {
         if (!upstream.ok) {
           const txt = await upstream.text().catch(() => "");
           lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
-          if (!isRawToken) {
+
+          // 区分错误来源：403=反爬/statsig 问题（非 token 问题）；401 invalid-credentials=SSO 失效
+          const isAntiBot = upstream.status === 403;
+          const isBadSso = upstream.status === 401 && /invalid-credentials|look up session/i.test(txt);
+
+          // 403 反爬：尝试用无头浏览器刷新 x-statsig-id 后重试，且不惩罚 token
+          if (isAntiBot && relay && !statsigRefreshed) {
+            statsigRefreshed = true;
+            console.warn("[statsig] conversations/new 返回 403 反爬，尝试刷新 x-statsig-id ...");
+            const harvestSso = (settingsBundle.grok.statsig_harvest_sso || "").trim() || jwt;
+            const newId = await maybeRefreshStatsig(c.env, relay, harvestSso).catch(() => null);
+            if (newId) {
+              settingsBundle.grok = { ...settingsBundle.grok, x_statsig_id: newId, dynamic_statsig: false };
+              console.warn("[statsig] 已刷新并写回 D1，用新 id 重试");
+              if (attempt < maxRetry - 1) continue; // 用新 statsig 重试，不记 token 失败
+            }
+          }
+
+          // 非反爬错误（401/429/500 等）才归因到 token：记失败 + 冷却
+          if (!isRawToken && !isAntiBot) {
+            if (isBadSso) console.warn(`[token] SSO 失效(...${jwt.slice(-6)})：invalid-credentials`);
             await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
             if (isVideoModel && upstream.status === 429) {
               await applyVideoCooldown(c.env.DB, jwt);
