@@ -169,10 +169,17 @@ def _is_error_form_statsig(statsig_b64):
 _harvest_lock = threading.Lock()
 
 
-def _harvest_statsig(sso, proxy_url=None, timeout_s=60):
+def _harvest_statsig(sso, proxy_url=None, timeout_s=90):
     """
-    用无头 Chromium 打开 grok.com（登录态），拦截 /rest 请求，抓取真实 x-statsig-id。
-    优先返回"真实指纹形式"（非错误串）。返回 dict。
+    用无头 Chromium 打开 grok.com/imagine（登录态），**实际驱动一次视频生成动作**，
+    拦截其发出的 POST /rest/app-chat/conversations/new 请求，抓取该请求携带的
+    真实 x-statsig-id，随后 abort 掉该请求（不真正生成视频、不消耗配额）。
+
+    为什么必须驱动视频生成：
+      grok 的 statsig 是"按请求"生成的。页面加载时后台读请求（GET /rest/...）携带的
+      statsig 对严格的写端点 /conversations/new 无效（会 403 anti-bot）。只有由真实
+      "视频生成"动作触发的 /conversations/new 请求，其 statsig 才被该端点接受，且可
+      跨 IP、跨 SSO 复用一段时间。纯文字 + 视频模式即可触发，无需上传图片。
 
     资源管理：
       - 全局锁串行执行，任意时刻最多 1 个浏览器进程；
@@ -203,29 +210,87 @@ def _harvest_statsig(sso, proxy_url=None, timeout_s=60):
                 if proxy_dict:
                     launch_kwargs["proxy"] = proxy_dict
                 browser = p.chromium.launch(**launch_kwargs)
-                ctx = browser.new_context(user_agent=_STATSIG_UA, viewport={"width": 1280, "height": 800})
+                ctx = browser.new_context(viewport={"width": 1280, "height": 800})
                 ctx.add_cookies([
                     {"name": "sso", "value": sso, "domain": ".grok.com", "path": "/"},
                     {"name": "sso-rw", "value": sso, "domain": ".grok.com", "path": "/"},
                 ])
                 page = ctx.new_page()
 
-                def on_request(req):
-                    v = req.headers.get("x-statsig-id")
-                    if v:
-                        captured.append((req.url, v))
+                # 拦截目标写端点：抓到 statsig 立即 abort，避免真生成视频耗配额
+                def route_new(route):
+                    try:
+                        sid = route.request.headers.get("x-statsig-id")
+                        if sid:
+                            captured.append((route.request.url, sid))
+                    except Exception:
+                        pass
+                    try:
+                        route.abort()
+                    except Exception:
+                        pass
 
-                page.on("request", on_request)
+                page.route("**/rest/app-chat/conversations/new", route_new)
+
                 try:
-                    page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=timeout_s * 1000)
+                    page.goto("https://grok.com/imagine", wait_until="domcontentloaded",
+                              timeout=min(60, timeout_s) * 1000)
                 except Exception:
                     pass
-                # 等 app 水合并发出后台 /rest 请求（这些请求会带 x-statsig-id）
+
                 deadline = t0 + timeout_s
-                while time.time() < deadline:
-                    page.wait_for_timeout(1000)
-                    if any(not _is_error_form_statsig(s) for _, s in captured):
+                # 1) 轮询：关促销弹窗；等输入条(提交按钮)与输入框就绪
+                submit_geo = None
+                input_geo = None
+                while time.time() < deadline and not (submit_geo and input_geo):
+                    state = page.evaluate("""() => {
+                        const btns=[...document.querySelectorAll('button')];
+                        const gs=btns.find(b=>(b.textContent||'').includes('Get Started'));
+                        if(gs){gs.click(); return {act:'modal'};}
+                        const g=(el)=>{if(!el)return null;const r=el.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};};
+                        const submit=document.querySelector("button[aria-label='提交']")||document.querySelector("button[aria-label='Submit']")||document.querySelector("button[type='submit']");
+                        const field=document.querySelector("[contenteditable='true']")||document.querySelector("input:not([type='file'])")||document.querySelector("textarea");
+                        return {act:'poll', submit:g(submit), field:g(field)};
+                    }""")
+                    if state.get("act") == "modal":
+                        page.wait_for_timeout(1200)
+                        continue
+                    if state.get("submit") and state.get("field"):
+                        submit_geo = state["submit"]
+                        input_geo = state["field"]
                         break
+                    page.wait_for_timeout(1500)
+
+                if submit_geo and input_geo:
+                    # 2) 切到「视频」模式（/conversations/new 由视频生成触发）
+                    page.evaluate("""() => {
+                        const btns=[...document.querySelectorAll('button')];
+                        const v=btns.find(b=>['视频','Video'].includes((b.textContent||'').trim()));
+                        if(v) v.click();
+                    }""")
+                    page.wait_for_timeout(1200)
+                    # 3) 聚焦输入框并打字
+                    page.evaluate("""() => {
+                        const f=document.querySelector("[contenteditable='true']")||document.querySelector("input:not([type='file'])")||document.querySelector('textarea');
+                        f?.focus();
+                    }""")
+                    page.mouse.click(input_geo["x"], input_geo["y"])
+                    page.wait_for_timeout(300)
+                    page.keyboard.type("a cat walking on the beach", delay=20)
+                    page.wait_for_timeout(1000)
+                    # 4) 点提交（坐标 + JS 兜底 + 回车）
+                    page.mouse.click(submit_geo["x"], submit_geo["y"])
+                    page.wait_for_timeout(400)
+                    page.evaluate("""() => {
+                        (document.querySelector("button[aria-label='提交']")||document.querySelector("button[aria-label='Submit']"))?.click();
+                    }""")
+                    try:
+                        page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                    # 5) 等待拦截到 /new
+                    while time.time() < deadline and not captured:
+                        page.wait_for_timeout(1000)
             finally:
                 if browser is not None:
                     try:
@@ -238,11 +303,13 @@ def _harvest_statsig(sso, proxy_url=None, timeout_s=60):
         _harvest_lock.release()
 
     if not captured:
-        return {"ok": False, "error": "未抓到任何 x-statsig-id（可能 SSO 失效或页面未登录）", "captured": 0}
+        return {"ok": False,
+                "error": "未抓到 /conversations/new 的 x-statsig-id（可能 SSO 失效、页面未登录或 UI 变化）",
+                "captured": 0}
 
-    # 优先真实指纹形式；其次退回任意（含错误串）
+    # 优先真实指纹形式；其次退回任意（含错误串）。取最后一个（重试往往更稳定）
     real = [(u, s) for (u, s) in captured if not _is_error_form_statsig(s)]
-    chosen_url, chosen = (real[0] if real else captured[0])
+    chosen_url, chosen = (real[-1] if real else captured[-1])
     return {
         "ok": True,
         "x_statsig_id": chosen,
@@ -294,10 +361,10 @@ def relay_statsig():
         return jsonify({"ok": False, "error": "missing sso"}), 400
 
     try:
-        timeout_s = int(data.get("timeout", 60))
+        timeout_s = int(data.get("timeout", 90))
     except Exception:
-        timeout_s = 60
-    timeout_s = max(20, min(timeout_s, 120))
+        timeout_s = 90
+    timeout_s = max(60, min(timeout_s, 150))
 
     # 选一个住宅代理（VPS 裸 IP 会被 grok 墙）；取优先级最高的已启用代理
     _, proxy_list = _load_proxy_config()
