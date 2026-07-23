@@ -20,6 +20,7 @@ import json
 import time
 import base64
 import threading
+import tempfile
 
 from curl_cffi import requests as cffi_requests
 import requests as std_requests
@@ -181,6 +182,15 @@ def _harvest_statsig(sso, proxy_url=None, timeout_s=90):
       "视频生成"动作触发的 /conversations/new 请求，其 statsig 才被该端点接受，且可
       跨 IP、跨 SSO 复用一段时间。纯文字 + 视频模式即可触发，无需上传图片。
 
+    新版前端(2026-07,Chrome150 时代)适配要点：
+      1) 会弹「Imagine Video 1.5」引导弹窗 + 多步「下一个」浮层，遮挡输入栏。改为导航前
+         用 add_init_script 预注入 localStorage 标记(visited-imagine3 /
+         tour-guide-state.dismissedTooltips=['imagineNewImagineModal'] /
+         new-feature-user:imagine:first-use)，让引导层根本不出现。
+      2) 底部模式选择器改成纯图标 role=radio(无文字)，按文字搜"视频"已失效，改为按
+         aria-label 或第 2 个 radio(摄像机图标)切换。
+      3) 图片模式的生成不再走 /conversations/new(走别的端点)，必须切到视频模式才会触发。
+
     资源管理：
       - 全局锁串行执行，任意时刻最多 1 个浏览器进程；
       - browser 在 finally 中确保 close()，即使异常也不残留进程；
@@ -210,7 +220,24 @@ def _harvest_statsig(sso, proxy_url=None, timeout_s=90):
                 if proxy_dict:
                     launch_kwargs["proxy"] = proxy_dict
                 browser = p.chromium.launch(**launch_kwargs)
-                ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+                ctx = browser.new_context(
+                    viewport={"width": 1280, "height": 900},
+                    locale="zh-CN",
+                    user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/150.0.0.0 Safari/537.36"),
+                )
+                # 关键：新版 imagine 前端会弹「Imagine Video 1.5」引导弹窗 + 多步浮层，
+                # 遮挡输入栏导致无头点不到、触发不了 /new。导航前预注入这些 localStorage
+                # 标记，让引导层根本不出现（key 由实测抓取得到）。
+                ctx.add_init_script(
+                    "try{"
+                    "localStorage.setItem('visited-imagine3','true');"
+                    "localStorage.setItem('tour-guide-state',JSON.stringify("
+                    "{teamIdsVisited:[],dismissedTooltips:['imagineNewImagineModal']}));"
+                    "localStorage.setItem('new-feature-user:imagine:first-use',String(Date.now()));"
+                    "}catch(e){}"
+                )
                 ctx.add_cookies([
                     {"name": "sso", "value": sso, "domain": ".grok.com", "path": "/"},
                     {"name": "sso-rw", "value": sso, "domain": ".grok.com", "path": "/"},
@@ -239,50 +266,51 @@ def _harvest_statsig(sso, proxy_url=None, timeout_s=90):
                     pass
 
                 deadline = t0 + timeout_s
-                # 1) 轮询：关促销弹窗；等输入条(提交按钮)与输入框就绪
-                submit_geo = None
-                input_geo = None
-                while time.time() < deadline and not (submit_geo and input_geo):
-                    state = page.evaluate("""() => {
-                        const btns=[...document.querySelectorAll('button')];
-                        const gs=btns.find(b=>(b.textContent||'').includes('Get Started'));
-                        if(gs){gs.click(); return {act:'modal'};}
-                        const g=(el)=>{if(!el)return null;const r=el.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};};
-                        const submit=document.querySelector("button[aria-label='提交']")||document.querySelector("button[aria-label='Submit']")||document.querySelector("button[type='submit']");
-                        const field=document.querySelector("[contenteditable='true']")||document.querySelector("input:not([type='file'])")||document.querySelector("textarea");
-                        return {act:'poll', submit:g(submit), field:g(field)};
-                    }""")
-                    if state.get("act") == "modal":
-                        page.wait_for_timeout(1200)
-                        continue
-                    if state.get("submit") and state.get("field"):
-                        submit_geo = state["submit"]
-                        input_geo = state["field"]
+                # 1) 等输入框(contenteditable)就绪。预注入已抑制引导层，仍保留兜底关弹窗。
+                editable_ready = False
+                while time.time() < deadline and not editable_ready:
+                    try:
+                        editable_ready = page.evaluate("""() => {
+                            // 兜底：如仍残留引导，点掉 Get Started/下一个/Next
+                            const b=[...document.querySelectorAll('button')].find(x=>/^(Get Started|下一个|下一步|Next|知道了|Got it)$/i.test((x.textContent||'').trim()));
+                            if(b){try{b.click();}catch(e){}}
+                            const f=document.querySelector("[contenteditable='true']");
+                            if(!f) return false;
+                            const r=f.getBoundingClientRect();
+                            return r.width>0 && r.height>0;
+                        }""")
+                    except Exception:
+                        editable_ready = False
+                    if editable_ready:
                         break
-                    page.wait_for_timeout(1500)
+                    page.wait_for_timeout(700)
 
-                if submit_geo and input_geo:
-                    # 2) 切到「视频」模式（/conversations/new 由视频生成触发）
+                if editable_ready:
+                    # 2) 切到「视频」模式。新版模式选择是纯图标 role=radio(无文字)，
+                    #    图片模式的生成不走 /conversations/new，只有视频模式才触发。
+                    #    优先按 aria-label 含 视频/Video；否则点第 2 个 radio(摄像机图标)。
                     page.evaluate("""() => {
-                        const btns=[...document.querySelectorAll('button')];
-                        const v=btns.find(b=>['视频','Video'].includes((b.textContent||'').trim()));
-                        if(v) v.click();
+                        const rs=[...document.querySelectorAll("[role='radio']")];
+                        let v=rs.find(r=>/视频|Video/i.test(r.getAttribute('aria-label')||''));
+                        if(!v && rs.length>=2) v=rs[1];
+                        if(v){try{v.click();}catch(e){}}
                     }""")
-                    page.wait_for_timeout(1200)
-                    # 3) 聚焦输入框并打字
-                    page.evaluate("""() => {
-                        const f=document.querySelector("[contenteditable='true']")||document.querySelector("input:not([type='file'])")||document.querySelector('textarea');
-                        f?.focus();
-                    }""")
-                    page.mouse.click(input_geo["x"], input_geo["y"])
-                    page.wait_for_timeout(300)
-                    page.keyboard.type("a cat walking on the beach", delay=20)
                     page.wait_for_timeout(1000)
-                    # 4) 点提交（坐标 + JS 兜底 + 回车）
-                    page.mouse.click(submit_geo["x"], submit_geo["y"])
-                    page.wait_for_timeout(400)
+                    # 3) 聚焦输入框并打字
+                    page.evaluate("""() => { document.querySelector("[contenteditable='true']")?.focus(); }""")
+                    page.wait_for_timeout(200)
+                    page.keyboard.type("a cat walking on the beach", delay=15)
+                    page.wait_for_timeout(800)
+                    # 4) 点提交：aria-label='提交'/'Submit'，否则右下角最靠右的可见按钮(上箭头)；+ 回车兜底
                     page.evaluate("""() => {
-                        (document.querySelector("button[aria-label='提交']")||document.querySelector("button[aria-label='Submit']"))?.click();
+                        const vis=(e)=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0;};
+                        let b=document.querySelector("button[aria-label='提交']")||document.querySelector("button[aria-label='Submit']");
+                        if(!b){
+                            const c=[...document.querySelectorAll('button')].filter(vis).filter(x=>x.getBoundingClientRect().top>650);
+                            c.sort((a,d)=>d.getBoundingClientRect().right-a.getBoundingClientRect().right);
+                            b=c[0];
+                        }
+                        if(b){try{b.click();}catch(e){}}
                     }""")
                     try:
                         page.keyboard.press("Enter")
@@ -319,6 +347,155 @@ def _harvest_statsig(sso, proxy_url=None, timeout_s=90):
         "real_count": len(real),
         "elapsed_ms": int((time.time() - t0) * 1000),
     }
+
+
+# ── statsig 单飞缓存（跨进程）──
+#
+# 目的：statsig id "一段时间内全局有效、可跨 SSO/IP 复用"。在 gunicorn 多 worker（多进程）下，
+#       进程内的 threading.Lock 无法跨进程串行化，集中失效时最坏会同时开多个 Chromium（OOM），
+#       且每个请求各抓一次（60~150s）造成"刷新风暴"。
+#
+# 基础单飞（single-flight）策略：
+#   1) 先看缓存：最近 STATSIG_CACHE_TTL 秒内抓到过 real 形式 id，直接复用，不抓浏览器；
+#   2) 需要抓时抢一把"跨进程文件锁"，全机同一时刻只允许 1 个抓取任务；
+#   3) 抢到锁后再"双检"缓存（等锁期间别的 worker 可能刚抓好）——是则直接复用；
+#   4) 没抢到锁（别人正在抓）等到超时后，回头再看一次缓存，取别人刚抓好的结果。
+#
+# 说明：这套只在 relay(Python) 侧，对 CF Worker 完全透明（接口/返回字段不变，仅多一个 cached 标记）。
+#       更进阶的 stale-while-revalidate / 定时预热 / id 池化暂不做（见 docs/relay_server并发解决方案.md）。
+
+_STATSIG_CACHE_PATH = os.environ.get(
+    "STATSIG_CACHE_PATH",
+    os.path.join(tempfile.gettempdir(), "grok_statsig_cache.json"),
+)
+_STATSIG_LOCK_PATH = _STATSIG_CACHE_PATH + ".lock"
+# 缓存新鲜期（秒）：此窗口内的 real id 直接复用。默认保守取 90s（略大于一次抓取耗时即可覆盖并发爆发）。
+# 若观测到 id 实际有效期更长，可调大以进一步减少抓取；反之调小更安全。通过环境变量 STATSIG_CACHE_TTL 覆盖。
+try:
+    _STATSIG_CACHE_TTL = int(os.environ.get("STATSIG_CACHE_TTL", "90"))
+except (TypeError, ValueError):
+    _STATSIG_CACHE_TTL = 90
+
+
+class _CrossProcessLock:
+    """
+    基于 O_CREAT|O_EXCL 原子创建锁文件的跨进程互斥锁（Linux/Windows 通用）。
+    - acquire(wait_seconds)：在 wait_seconds 内轮询抢锁，抢到返回 True，超时返回 False。
+    - 陈旧保护：锁文件 mtime 超过 stale_seconds 视为持有者已崩溃，抢占之，避免死锁。
+      stale_seconds 必须 > 最长一次抓取耗时，否则会在抓取途中被误抢，导致重复开浏览器。
+    """
+
+    def __init__(self, path, stale_seconds):
+        self.path = path
+        self.stale_seconds = stale_seconds
+        self._fd = None
+
+    def acquire(self, wait_seconds):
+        deadline = time.time() + max(0, wait_seconds)
+        while True:
+            try:
+                self._fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(self._fd, str(time.time()).encode("ascii"))
+                except OSError:
+                    pass
+                return True
+            except FileExistsError:
+                # 已有持有者：检查是否陈旧（崩溃残留），是则抢占
+                try:
+                    age = time.time() - os.path.getmtime(self.path)
+                    if age > self.stale_seconds:
+                        debug_print(f"Warning:relay_server: statsig 锁陈旧({int(age)}s)，抢占")
+                        try:
+                            os.remove(self.path)
+                        except OSError:
+                            pass
+                        continue
+                except OSError:
+                    continue
+                if time.time() >= deadline:
+                    return False
+                time.sleep(0.5)
+
+    def release(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
+def _read_statsig_cache():
+    try:
+        with open(_STATSIG_CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_statsig_cache(result):
+    """只缓存 real 形式的成功结果（error 形式不稳定，不复用）。原子写。"""
+    if not (result.get("ok") and result.get("x_statsig_id") and result.get("form") == "real"):
+        return
+    payload = dict(result)
+    payload["harvested_at"] = time.time()
+    try:
+        tmp = _STATSIG_CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, _STATSIG_CACHE_PATH)
+    except Exception as e:
+        debug_print(f"Warning:relay_server: statsig 缓存写入失败: {e}")
+
+
+def _cache_fresh(cached):
+    """缓存有效且在新鲜期内、且为 real 形式，才可复用。"""
+    if not cached or not cached.get("ok") or not cached.get("x_statsig_id"):
+        return False
+    if cached.get("form") != "real":
+        return False
+    if time.time() - cached.get("harvested_at", 0) > _STATSIG_CACHE_TTL:
+        return False
+    return True
+
+
+def _get_statsig(sso, proxy_url=None, timeout_s=90):
+    """
+    单飞获取 statsig id：命中缓存直接复用；否则抢跨进程锁抓取（全机唯一），抓完写缓存。
+    未抢到锁的并发请求会等到锁释放后取到刚抓好的缓存。返回结构与 _harvest_statsig 一致，
+    复用缓存时附带 cached=True。
+    """
+    cached = _read_statsig_cache()
+    if _cache_fresh(cached):
+        return {**cached, "cached": True}
+
+    # 锁陈旧阈值 > 最长抓取耗时（timeout_s ≤ 150）+ 浏览器启动余量；等锁时长略大于一次抓取，
+    # 以便"等待者"能撑到持有者抓完后拿到新缓存。
+    lock = _CrossProcessLock(_STATSIG_LOCK_PATH, stale_seconds=max(210, timeout_s + 60))
+    if not lock.acquire(wait_seconds=max(10, timeout_s + 15)):
+        # 没抢到锁：持有者可能已抓完并写好缓存，回头再看一次
+        cached = _read_statsig_cache()
+        if _cache_fresh(cached):
+            return {**cached, "cached": True}
+        return {"ok": False, "error": "harvester busy（抓取任务超时未完成）", "captured": 0}
+
+    try:
+        # 双检：等锁期间别的 worker 可能刚抓好
+        cached = _read_statsig_cache()
+        if _cache_fresh(cached):
+            return {**cached, "cached": True}
+
+        result = _harvest_statsig(sso, proxy_url=proxy_url, timeout_s=timeout_s)
+        if result.get("ok"):
+            _write_statsig_cache(result)
+        return result
+    finally:
+        lock.release()
 
 
 # ── 路由 ──
@@ -370,13 +547,17 @@ def relay_statsig():
     _, proxy_list = _load_proxy_config()
     proxy_url = proxy_list[0]["proxy"].strip() if proxy_list else None
 
-    debug_print(f"relay_server: /relay/statsig 开始抓取 (proxy={'有' if proxy_url else '无(直连)'}, timeout={timeout_s}s)")
-    result = _harvest_statsig(sso, proxy_url=proxy_url, timeout_s=timeout_s)
+    debug_print(f"relay_server: /relay/statsig 请求 (proxy={'有' if proxy_url else '无(直连)'}, timeout={timeout_s}s)")
+    result = _get_statsig(sso, proxy_url=proxy_url, timeout_s=timeout_s)
 
     if result.get("ok"):
-        debug_print(f"relay_server: statsig 抓取成功 form={result['form']} "
-                    f"real={result.get('real_count')}/{result.get('captured')} "
-                    f"elapsed={result.get('elapsed_ms')}ms")
+        if result.get("cached"):
+            debug_print(f"relay_server: statsig 命中缓存复用 form={result.get('form')} "
+                        f"(单飞，未开浏览器)")
+        else:
+            debug_print(f"relay_server: statsig 抓取成功 form={result['form']} "
+                        f"real={result.get('real_count')}/{result.get('captured')} "
+                        f"elapsed={result.get('elapsed_ms')}ms")
         return jsonify(result)
     else:
         debug_print(f"Error:relay_server: statsig 抓取失败: {result.get('error')}")
@@ -476,6 +657,14 @@ def relay_forward():
 # ── 独立运行 ──
 
 def create_app():
+    # 独立进程部署（gunicorn "relay_server:create_app()"）时，__main__ 分支不会执行，
+    # 必须在这里显式初始化 relay 配置。否则 secret 会退回默认值，导致 CF Worker 携带的
+    # X-Relay-Secret 与本服务不一致，所有 /relay 请求被判为 invalid secret（403）。
+    # 通过环境变量注入；未设置时保持模块默认值（与旧行为一致）。
+    init_relay(
+        secret=os.environ.get("RELAY_SECRET"),
+        proxy_config=os.environ.get("RELAY_PROXY_CONFIG"),
+    )
     app = Flask(__name__)
     app.register_blueprint(relay_bp)
     return app
