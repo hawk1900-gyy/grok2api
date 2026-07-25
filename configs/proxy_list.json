@@ -1,8 +1,6 @@
 {
   "proxy_routes": [
-    "/conversations/new",
-    "/upload-file",
-    "/media/post/create"
+    "/conversations/new"
   ],
   "proxies": [
     {
